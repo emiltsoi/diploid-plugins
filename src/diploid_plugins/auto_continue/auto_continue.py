@@ -16,6 +16,10 @@ from diploid_agent.runtime.plugin_runtime import PluginRuntime
 
 logger = logging.getLogger(__name__)
 
+# Cap the continuation payload so the wake queue and downstream Telegram edits
+# do not balloon with a huge partial thought stream.
+_MAX_CONTINUATION_TEXT_CHARS = 2000
+
 
 def _join_notices(*parts: str | None) -> str | None:
     """Concatenate non-empty notice strings with a blank line between them."""
@@ -180,8 +184,8 @@ class AutoContinuePlugin(StatePlugin):
 
             active = self._runtime._active_turns.get(self.chat_id)
             if active is not None:
-                payload["message_text"] = active.message_text
-                payload["thought_text"] = active.thought_text
+                payload["message_text"] = active.message_text[:_MAX_CONTINUATION_TEXT_CHARS]
+                payload["thought_text"] = active.thought_text[:_MAX_CONTINUATION_TEXT_CHARS]
         except Exception:
             logger.exception("Failed to capture continuation placeholder for %s", self.chat_id)
 
