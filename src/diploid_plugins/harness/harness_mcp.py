@@ -84,6 +84,17 @@ class HarnessMcpServer(StdioMcpServer):
                     "required": ["prompt"],
                 },
             },
+            {
+                "name": "harness_subagent_status",
+                "description": (
+                    "Check the status of background subagents for the current chat, "
+                    "including whether they are running, completed, or failed."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
         ]
 
     def _call_tool(
@@ -92,6 +103,15 @@ class HarnessMcpServer(StdioMcpServer):
         arguments: dict[str, Any],
         req_id: Any,
     ) -> dict[str, Any]:
+        if name == "harness_subagent_status":
+            result = self._request("GET", f"/subagents/{self.chat_id}")
+            if result.get("error"):
+                return _error_response(req_id, result["error"])
+            return _tool_result(
+                req_id,
+                json.dumps(result, ensure_ascii=False, default=str),
+            )
+
         if name != "harness_subagent":
             return _error_response(req_id, f"Unknown tool: {name}")
 
