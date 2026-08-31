@@ -116,6 +116,16 @@ class AutoContinuePlugin(StatePlugin):
             self._save_state()
 
     def after_turn(self, turn: TurnInfo) -> None:
+        # If the harness has suppressed auto-continue (e.g., a service restart
+        # is pending), drop the continuation chain and any deferred notice.
+        if self._runtime and self._runtime.is_auto_continue_suppressed(self.chat_id):
+            self._cancel_pending()
+            self._state.pop("deferred_notice", None)
+            self._state.pop("send_deferred", None)
+            self._state["attempt"] = 0
+            self._save_state()
+            return
+
         reason = turn.last_stop_reason
         if reason not in self._stop_reasons:
             # The turn finished or was stopped by the user. Send any deferred
