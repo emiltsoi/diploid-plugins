@@ -1,6 +1,7 @@
 """Built-in state plugins for diploid-agent."""
 
 from diploid_plugins.auto_continue import AutoContinuePlugin
+from diploid_plugins.body import BodyPlugin
 from diploid_plugins.continuity import ContinuityPlugin
 from diploid_plugins.curriculum import CurriculumPlugin
 from diploid_plugins.identity import IdentityPlugin
@@ -12,6 +13,7 @@ from diploid_plugins.working_memory import WorkingMemoryPlugin
 
 __all__ = [
     "AutoContinuePlugin",
+    "BodyPlugin",
     "ContinuityPlugin",
     "CurriculumPlugin",
     "IdentityPlugin",

@@ -6,6 +6,7 @@ These plugins implement the `diploid-agent` plugin contract (`StatePlugin` lifec
 
 ## Included plugins
 
+- `body` — physical/emotional body state that persists across sessions and transport restarts.
 - `continuity` — wake state, time asleep, last stop reason, and pending dispatches.
 - `working_memory` — a chat-scoped scratchpad for the current turn.
 - `persistent_memory` — auto-recall and auto-promote of `memory` blocks.
