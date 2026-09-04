@@ -127,6 +127,9 @@ class FakeRuntime:
     def is_continuation_message(self, text: str) -> bool:
         return self.context_builder.is_continuation_message(text)
 
+    def is_auto_continue_suppressed(self, chat_id: str) -> bool:
+        return False
+
 
 def _make_plugin(
     tmp_path: Path,
