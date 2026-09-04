@@ -146,14 +146,35 @@ class ContinuityPlugin(StatePlugin):
     def on_turn_error(self, context: TurnErrorContext) -> None:
         self._flush_active_turn()
 
-    def prompt_block(self, max_chars: int | None = None) -> str | None:
+    def prompt_block(self, max_chars: int | None = None, compact: bool = False) -> str | None:
         last_turn_at = self._state.get("last_turn_at")
         if not last_turn_at:
             return None
 
+        instance_id = self._state.get("this_instance_id", "unknown")
+        last_session = self._state.get("last_session_number")
+        last_turn = self._state.get("last_turn_number")
+        last_reason = self._state.get("last_stop_reason") or "unknown"
+
+        if compact:
+            parts = ["## Wake state"]
+            if last_session is not None and last_turn is not None:
+                parts.append(
+                    f"Last turn: session {last_session}, turn {last_turn}, {last_reason}."
+                )
+            time_asleep = self._state.get("time_asleep_seconds")
+            if time_asleep is not None:
+                parts.append(f"Silent for {self._format_duration(time_asleep)}.")
+            pending = self._state.get("pending_dispatches") or []
+            if pending:
+                parts.append(f"Pending work: {len(pending)} dispatch(es).")
+            block = " ".join(parts)
+            if max_chars is not None and len(block) > max_chars:
+                block = block[:max_chars]
+            return block
+
         lines = ["## Wake state"]
 
-        instance_id = self._state.get("this_instance_id", "unknown")
         instance_started = self._state.get("instance_started_at")
         if instance_started:
             lines.append(
@@ -162,13 +183,10 @@ class ContinuityPlugin(StatePlugin):
         else:
             lines.append(f"- Instance: {instance_id}")
 
-        last_session = self._state.get("last_session_number")
-        last_turn = self._state.get("last_turn_number")
-        last_reason = self._state.get("last_stop_reason")
         if last_session is not None and last_turn is not None:
             lines.append(
                 f"- Last turn: session {last_session}, turn {last_turn}, "
-                f"stop reason {last_reason or 'unknown'}, at {self._format_time(last_turn_at)}"
+                f"stop reason {last_reason}, at {self._format_time(last_turn_at)}"
             )
 
         time_asleep = self._state.get("time_asleep_seconds")

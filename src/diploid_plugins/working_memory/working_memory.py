@@ -95,7 +95,7 @@ class WorkingMemoryPlugin(StatePlugin):
         self._save_state()
         return f"Cleared working memory {field}."
 
-    def prompt_block(self, max_chars: int | None = None) -> str | None:
+    def prompt_block(self, max_chars: int | None = None, compact: bool = False) -> str | None:
         intent = self._state.get("intent", "")
         plan = self._state.get("plan") or []
         questions = self._state.get("open_questions") or []
@@ -103,6 +103,24 @@ class WorkingMemoryPlugin(StatePlugin):
 
         if not intent and not plan and not questions and not notes:
             return None
+
+        if compact:
+            lines = ["## Working memory"]
+            if intent:
+                lines.append(f"- Intent: {intent}")
+            for label, items in [
+                ("Plan", plan),
+                ("Open", questions),
+                ("Notes", notes),
+            ]:
+                for item in items[:3]:
+                    lines.append(f"- {label}: {item}")
+                if len(items) > 3:
+                    lines.append(f"- {label}: ... ({len(items) - 3} more)")
+            block = "\n".join(lines)
+            if max_chars is not None and len(block) > max_chars:
+                block = block[:max_chars]
+            return block
 
         lines = ["## Working memory"]
 
