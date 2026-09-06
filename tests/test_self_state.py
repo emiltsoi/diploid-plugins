@@ -172,3 +172,20 @@ def test_before_record_turn_saves_fallback_when_no_block(tmp_path: Path) -> None
     assert result.reply == reply
     assert p._load_state()
     assert "I just replied" in p._load_state()
+
+
+def test_before_record_turn_preserves_existing_state_when_no_block(
+    tmp_path: Path,
+) -> None:
+    p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
+    p._save_state("I am focused on the continuity work.")
+    reply = "Plain reply without a self_state block."
+    ctx = RecordTurnContext(
+        chat_id="chat-1",
+        record=_record(),
+        turn_number=2,
+        reply=reply,
+    )
+    result = p.before_record_turn(ctx)
+    assert result.reply == reply
+    assert p._load_state() == "I am focused on the continuity work."

@@ -93,7 +93,11 @@ class SelfStatePlugin(StatePlugin):
             self._save_state(note)
             context.reply = stripped
         else:
-            self._save_state(self._fallback_note(context.record, context.reply))
+            # Only seed an empty state with a fallback note. If the assistant has
+            # already written a meaningful self-state, preserve it across turns
+            # where no `<self_state>` block is provided.
+            if not self._load_state().strip():
+                self._save_state(self._fallback_note(context.record, context.reply))
         return context
 
     def prompt_block(self, max_chars: int | None = None) -> str | None:
