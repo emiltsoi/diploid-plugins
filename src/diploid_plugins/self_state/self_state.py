@@ -16,7 +16,7 @@ from diploid_agent.runtime.plugin_runtime import PluginRuntime
 class SelfStatePlugin(StatePlugin):
     """Save and resume a first-person self-state note across sessions."""
 
-    _SELF_STATE_RE = re.compile(r"<self_state>(.*?)</self_state>", re.IGNORECASE | re.DOTALL)
+    _SELF_STATE_TAG_RE = re.compile(r"</?self_state>", re.IGNORECASE)
     _HEADER = "## State I am resuming from"
     _INSTRUCTION = (
         "At the end of your reply, append a private `<self_state>` block in first "
@@ -52,12 +52,30 @@ class SelfStatePlugin(StatePlugin):
         self._state_path.write_text(text, encoding="utf-8")
 
     def _extract_self_state(self, reply: str) -> tuple[str, str | None]:
-        matches = list(self._SELF_STATE_RE.finditer(reply))
-        if not matches:
+        # Pair each closing tag with the nearest unmatched opening tag so a
+        # ``<self_state>`` mention in prose cannot swallow the real block.
+        opens: list[tuple[int, int]] = []
+        pairs: list[tuple[int, int, int, int]] = []
+        for match in self._SELF_STATE_TAG_RE.finditer(reply):
+            if match.group(0).startswith("</"):
+                if opens:
+                    o_start, o_end = opens.pop()
+                    pairs.append((o_start, o_end, match.start(), match.end()))
+            else:
+                opens.append((match.start(), match.end()))
+        if not pairs:
             return reply, None
-        note = matches[-1].group(1).strip()
-        stripped = self._SELF_STATE_RE.sub("", reply).rstrip()
-        return stripped, note
+        o_start, o_end, c_start, _ = pairs[-1]
+        note = reply[o_end:c_start].strip()
+        parts: list[str] = []
+        pos = 0
+        for s0, _, _, c1 in sorted(pairs):
+            if s0 < pos:
+                continue
+            parts.append(reply[pos:s0])
+            pos = c1
+        parts.append(reply[pos:])
+        return "".join(parts).rstrip(), note
 
     def _fallback_note(self, record: SessionRecord | None, reply: str) -> str:
         if record is not None and record.last_stop_reason != "completed":

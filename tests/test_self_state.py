@@ -70,6 +70,35 @@ def test_extract_self_state_case_insensitive_and_dotall(tmp_path: Path) -> None:
     assert "<SELF_STATE>" not in stripped
 
 
+def test_extract_self_state_ignores_stray_open_mentions(tmp_path: Path) -> None:
+    p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
+    reply = (
+        "I put state in a `<self_state>` block, and `<self_state>` again.\n"
+        "<self_state>I am focused.</self_state>"
+    )
+    stripped, note = p._extract_self_state(reply)
+    assert note == "I am focused."
+    assert "block to save" not in note
+    assert "I put state in a `<self_state>` block" in stripped
+    assert "<self_state>I am focused.</self_state>" not in stripped
+
+
+def test_extract_self_state_stray_open_after_block(tmp_path: Path) -> None:
+    p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
+    reply = "<self_state>I am focused.</self_state> Then I mention `<self_state>` in prose."
+    stripped, note = p._extract_self_state(reply)
+    assert note == "I am focused."
+    assert "in prose" in stripped
+
+
+def test_extract_self_state_unmatched_close(tmp_path: Path) -> None:
+    p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
+    reply = "Text with a stray `</self_state>` mention."
+    stripped, note = p._extract_self_state(reply)
+    assert note is None
+    assert stripped == reply
+
+
 def test_fallback_note_completed(tmp_path: Path) -> None:
     p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
     note = p._fallback_note(_record("completed"), "short reply")
