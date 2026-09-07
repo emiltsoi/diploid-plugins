@@ -94,9 +94,13 @@ class ContinuityPlugin(StatePlugin):
         """Preserve a leftover active-turn snapshot as an interrupted turn.
 
         ``chat_active_turn.json`` is removed by ``on_turn_end``; if it still
-        exists at wake, the previous process died mid-turn and ``record_turn``
-        never ran — its side effects may exist without a transcript entry.
+        exists while no turn is streaming, the previous process died mid-turn
+        and ``record_turn`` never ran — its side effects may exist without a
+        transcript entry.
         """
+        if self._pending_partial is not None:
+            # A turn is streaming right now; the snapshot belongs to it.
+            return
         active_path = self._active_turn_path()
         if not active_path.exists():
             return
@@ -191,6 +195,10 @@ class ContinuityPlugin(StatePlugin):
         self._flush_active_turn()
 
     def prompt_block(self, max_chars: int | None = None, compact: bool = False) -> str | None:
+        # A leftover active-turn snapshot at prompt-build time means the last
+        # turn died mid-flight — no wake event is required to notice it.
+        self._capture_interrupted_turn()
+
         last_turn_at = self._state.get("last_turn_at")
         if not last_turn_at:
             return None

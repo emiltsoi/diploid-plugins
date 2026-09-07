@@ -231,3 +231,58 @@ def test_turn_end_clears_interrupted_flag(tmp_path: Path) -> None:
         )
     )
     assert "interrupted_turn" not in p._state
+
+
+def test_prompt_block_captures_stale_snapshot_without_wake(tmp_path: Path) -> None:
+    """A leftover snapshot must be caught even when no wake event fires."""
+    chat_dir = tmp_path / "c1"
+    chat_dir.mkdir()
+    (chat_dir / "chat_active_turn.json").write_text(
+        json.dumps(
+            {
+                "session_number": 1,
+                "turn_number": 7,
+                "user_message": "Approve, please proceed",
+                "message_text": "partial work",
+                "updated_at": 9.0,
+            }
+        )
+    )
+    runtime = _RecordingRuntime()
+    p = _make_plugin(tmp_path, runtime=runtime)
+    # Seed last_turn_at so prompt_block does not early-return.
+    p._state["last_turn_at"] = 8.0
+
+    block = p.prompt_block()
+
+    assert block is not None
+    assert "interrupted mid-flight" in block
+    assert (chat_dir / "chat_interrupted_turn.json").exists()
+    assert not (chat_dir / "chat_active_turn.json").exists()
+    assert len(runtime.system_notes) == 1
+
+
+def test_prompt_block_does_not_capture_live_turn_snapshot(tmp_path: Path) -> None:
+    """During an in-flight turn the snapshot is live, not stale."""
+    chat_dir = tmp_path / "c1"
+    chat_dir.mkdir()
+    runtime = _RecordingRuntime()
+    p = _make_plugin(tmp_path, runtime=runtime)
+    p._state["last_turn_at"] = 8.0
+    p.on_partial(
+        PartialTurn(
+            chat_id="c1",
+            session_number=1,
+            turn_number=8,
+            user_message="hi",
+            message_text="streaming now",
+            updated_at=10.0,
+        )
+    )
+
+    p.prompt_block()
+
+    assert (chat_dir / "chat_active_turn.json").exists()
+    assert not (chat_dir / "chat_interrupted_turn.json").exists()
+    assert "interrupted_turn" not in p._state
+    assert runtime.system_notes == []
