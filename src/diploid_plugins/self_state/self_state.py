@@ -22,8 +22,23 @@ class SelfStatePlugin(StatePlugin):
     """
 
     _SELF_STATE_TAG_RE = re.compile(r"</?self_state>", re.IGNORECASE)
+    _FIRST_PERSON_RE = re.compile(
+        r"(?:"
+        r"I(?:[''']m| am|[''']ve| have|[''']d| would|[''']ll| will)?"
+        r"|My|Mine|Me|Myself"
+        r"|We(?:[''']re| are|[''']ve| have|[''']d| would|[''']ll| will)?"
+        r"|Our|Ours|Us|Ourselves"
+        r")\b",
+        re.IGNORECASE,
+    )
     _HEADER = "## State I am resuming from"
-    _REMINDER = "Update this with a `<self_state>` block when your state changes."
+    _REMINDER = (
+        "Update this with a `<self_state>` block in first person, present tense."
+    )
+    _REJECTED_REMINDER = (
+        "Your last `<self_state>` block was not in first person and was not saved. "
+        "Write it as your own direct statement of being: 'I am...' or 'We are...'."
+    )
 
     def __init__(
         self,
@@ -35,6 +50,7 @@ class SelfStatePlugin(StatePlugin):
         super().__init__(config, chat_id, sessions_root, runtime=runtime)
         self._state_path: Path = self._chat_dir() / self.config.state_file
         self._remind: bool = True
+        self._rejected: bool = False
         self._last_streamed_note: str | None = None
 
     def _chat_dir(self) -> Path:
@@ -55,6 +71,15 @@ class SelfStatePlugin(StatePlugin):
             return self._state_path.stat().st_mtime
         except OSError:
             return None
+
+    def _is_first_person(self, note: str) -> bool:
+        """Return True when the note starts as a first-person present statement.
+
+        Leading whitespace and common markdown list/quote markers are ignored.
+        """
+        lead = note.strip().lstrip(">-*# \t")
+        match = self._FIRST_PERSON_RE.match(lead)
+        return match is not None and match.start() == 0
 
     def _extract_self_state(self, reply: str) -> tuple[str, str | None]:
         # Pair each closing tag with the nearest unmatched opening tag so a
@@ -84,14 +109,24 @@ class SelfStatePlugin(StatePlugin):
 
     def on_waking(self, context: WakeContext) -> None:
         self._remind = True
+        self._rejected = False
         self._last_streamed_note = None
+
+    def _maybe_save_state(self, note: str) -> None:
+        """Save the note if it is first-person; otherwise flag a rejected reminder."""
+        if self._is_first_person(note):
+            self._save_state(note)
+            self._rejected = False
+        else:
+            self._rejected = True
+            self._remind = True
 
     def on_partial(self, partial: PartialTurn) -> None:
         # Save a <self_state> block as soon as it completes in the stream so the
         # note survives a mid-turn kill; record_turn would be too late.
         _, note = self._extract_self_state(partial.message_text or "")
         if note is not None and note != self._last_streamed_note:
-            self._save_state(note)
+            self._maybe_save_state(note)
             self._last_streamed_note = note
 
     def prompt_block_changed(self, since: float | None = None) -> bool | None:
@@ -107,29 +142,32 @@ class SelfStatePlugin(StatePlugin):
     def before_record_turn(self, context: RecordTurnContext) -> RecordTurnContext:
         stripped, note = self._extract_self_state(context.reply)
         if note is not None:
-            self._save_state(note)
+            self._maybe_save_state(note)
             context.reply = stripped
         return context
 
     def prompt_block(self, max_chars: int | None = None, compact: bool = False) -> str | None:
         note = self._load_state().strip()
         remind = self._remind
+        rejected = self._rejected
         self._remind = False
+        self._rejected = False
 
         if not note and not remind:
             return None
 
+        reminder = self._REJECTED_REMINDER if rejected else self._REMINDER
         parts: list[str] = [self._HEADER]
         if note:
             parts.append(note)
         if remind:
-            parts.append(self._REMINDER)
+            parts.append(reminder)
         block = "\n\n".join(parts)
 
         if max_chars is not None and len(block) > max_chars:
             base_parts = [self._HEADER]
             if remind:
-                base_parts.append(self._REMINDER)
+                base_parts.append(reminder)
             base = "\n\n".join(base_parts)
             note_budget = max_chars - len(base) - (2 if note else 0)
             if note and note_budget > 0:

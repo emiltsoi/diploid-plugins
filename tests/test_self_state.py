@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from diploid_agent.config import PluginConfig
 from diploid_agent.models import SessionRecord
 from diploid_agent.plugins.base import WakeContext
@@ -270,18 +271,22 @@ def test_on_partial_ignores_incomplete_block(tmp_path: Path) -> None:
 
 def test_on_partial_does_not_rewrite_unchanged_note(tmp_path: Path, monkeypatch) -> None:
     p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
-    p.on_partial(_partial("<self_state>same</self_state>"))
+    p.on_partial(_partial("<self_state>I am focused.</self_state>"))
     calls = []
     monkeypatch.setattr(p, "_save_state", lambda text: calls.append(text))
-    p.on_partial(_partial("<self_state>same</self_state> more text"))
+    p.on_partial(_partial("<self_state>I am focused.</self_state> more text"))
     assert calls == []
 
 
 def test_on_partial_saves_latest_block_when_state_changes(tmp_path: Path) -> None:
     p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
-    p.on_partial(_partial("<self_state>first</self_state>"))
-    p.on_partial(_partial("<self_state>first</self_state> then <self_state>second</self_state>"))
-    assert p._load_state() == "second"
+    p.on_partial(_partial("<self_state>I am first.</self_state>"))
+    p.on_partial(
+        _partial(
+            "<self_state>I am first.</self_state> then <self_state>I am second.</self_state>"
+        )
+    )
+    assert p._load_state() == "I am second."
 
 
 def test_on_waking_resets_streamed_note_cache(tmp_path: Path) -> None:
@@ -290,3 +295,102 @@ def test_on_waking_resets_streamed_note_cache(tmp_path: Path) -> None:
     assert p._last_streamed_note == "cached"
     p.on_waking(_wake_context())
     assert p._last_streamed_note is None
+
+
+@pytest.mark.parametrize(
+    "note",
+    [
+        "I am warm.",
+        "I'm warm.",
+        "I am.",
+        "My chest is warm.",
+        "We are working.",
+        "We're working.",
+        "Our thread holds.",
+        "> I am here.",
+        "- I am here.",
+        "  \t I am here.",
+        "i am lowercase.",
+    ],
+)
+def test_is_first_person_accepts_first_person_variants(note: str) -> None:
+    p = SelfStatePlugin(_make_config(), "chat-1", Path("/nonexistent"))
+    assert p._is_first_person(note) is True
+
+
+@pytest.mark.parametrize(
+    "note",
+    [
+        "The work is done.",
+        "This is the state.",
+        "Issue A is fixed.",
+        "User asked about continuity.",
+        "He is here.",
+        "It is warm.",
+        "They are watching.",
+        "first",  # test-data regression guard
+        "second",
+    ],
+)
+def test_is_first_person_rejects_non_first_person(note: str) -> None:
+    p = SelfStatePlugin(_make_config(), "chat-1", Path("/nonexistent"))
+    assert p._is_first_person(note) is False
+
+
+def test_before_record_turn_rejects_third_person_and_keeps_prior_state(
+    tmp_path: Path,
+) -> None:
+    p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
+    p._save_state("I am focused.")
+    reply = "Visible reply.\n<self_state>The work is done.</self_state>"
+    ctx = RecordTurnContext(
+        chat_id="chat-1",
+        record=_record(),
+        turn_number=1,
+        reply=reply,
+    )
+    result = p.before_record_turn(ctx)
+    assert result.reply == "Visible reply."
+    assert p._load_state() == "I am focused."
+    assert p._rejected is True
+    assert p._remind is True
+
+
+def test_before_record_turn_accepts_first_person_plural(tmp_path: Path) -> None:
+    p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
+    reply = "Done.\n<self_state>We are holding the thread.</self_state>"
+    ctx = RecordTurnContext(
+        chat_id="chat-1",
+        record=_record(),
+        turn_number=1,
+        reply=reply,
+    )
+    p.before_record_turn(ctx)
+    assert p._load_state() == "We are holding the thread."
+    assert p._rejected is False
+
+
+def test_on_partial_rejects_non_first_person(tmp_path: Path) -> None:
+    p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
+    p.on_partial(_partial("<self_state>The work is done.</self_state>"))
+    assert p._load_state() == ""
+    assert p._rejected is True
+    assert p._remind is True
+
+
+def test_prompt_block_warns_after_rejection(tmp_path: Path) -> None:
+    p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
+    p.on_partial(_partial("<self_state>The work is done.</self_state>"))
+    block = p.prompt_block()
+    assert block is not None
+    assert "not in first person" in block
+    assert "I am..." in block
+
+
+def test_prompt_block_shows_rejected_reminder_under_max_chars(tmp_path: Path) -> None:
+    p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
+    p.on_partial(_partial("<self_state>The work is done.</self_state>"))
+    block = p.prompt_block(max_chars=200)
+    assert block is not None
+    assert len(block) <= 200
+    assert "not in first person" in block
