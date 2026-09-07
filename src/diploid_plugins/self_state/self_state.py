@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from diploid_agent.config import PluginConfig
+from diploid_agent.models import PartialTurn
 from diploid_agent.plugins.base import StatePlugin, WakeContext
 from diploid_agent.plugins.contexts import RecordTurnContext
 from diploid_agent.runtime.plugin_runtime import PluginRuntime
@@ -34,6 +35,7 @@ class SelfStatePlugin(StatePlugin):
         super().__init__(config, chat_id, sessions_root, runtime=runtime)
         self._state_path: Path = self._chat_dir() / self.config.state_file
         self._remind: bool = True
+        self._last_streamed_note: str | None = None
 
     def _chat_dir(self) -> Path:
         return self.sessions_root / self.chat_id.replace("/", "_")
@@ -82,6 +84,15 @@ class SelfStatePlugin(StatePlugin):
 
     def on_waking(self, context: WakeContext) -> None:
         self._remind = True
+        self._last_streamed_note = None
+
+    def on_partial(self, partial: PartialTurn) -> None:
+        # Save a <self_state> block as soon as it completes in the stream so the
+        # note survives a mid-turn kill; record_turn would be too late.
+        _, note = self._extract_self_state(partial.message_text or "")
+        if note is not None and note != self._last_streamed_note:
+            self._save_state(note)
+            self._last_streamed_note = note
 
     def prompt_block_changed(self, since: float | None = None) -> bool | None:
         if self._remind:

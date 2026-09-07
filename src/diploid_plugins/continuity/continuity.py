@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -13,6 +14,8 @@ from diploid_agent.models import PartialTurn
 from diploid_agent.plugins.base import SleepContext, StatePlugin, TurnInfo, WakeContext
 from diploid_agent.plugins.contexts import TurnErrorContext
 from diploid_agent.runtime.plugin_runtime import PluginRuntime
+
+logger = logging.getLogger(__name__)
 
 
 class ContinuityPlugin(StatePlugin):
@@ -84,7 +87,47 @@ class ContinuityPlugin(StatePlugin):
         previous_instance = self._state.get("this_instance_id")
         self._state["instance_changed"] = previous_instance != context.instance_id
 
+        self._capture_interrupted_turn()
         self._save_state()
+
+    def _capture_interrupted_turn(self) -> None:
+        """Preserve a leftover active-turn snapshot as an interrupted turn.
+
+        ``chat_active_turn.json`` is removed by ``on_turn_end``; if it still
+        exists at wake, the previous process died mid-turn and ``record_turn``
+        never ran — its side effects may exist without a transcript entry.
+        """
+        active_path = self._active_turn_path()
+        if not active_path.exists():
+            return
+        try:
+            data = json.loads(active_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            return
+        try:
+            interrupted_path = self._chat_dir() / "chat_interrupted_turn.json"
+            interrupted_path.write_text(
+                json.dumps(data, indent=2, default=str)
+            )
+            active_path.unlink()
+        except OSError:
+            return
+        self._state["interrupted_turn"] = {
+            "turn_number": data.get("turn_number"),
+            "session_number": data.get("session_number"),
+            "user_message": (data.get("user_message") or "")[:200],
+            "updated_at": data.get("updated_at"),
+        }
+        if self._runtime is not None:
+            try:
+                self._runtime.record_system_note(
+                    self.chat_id,
+                    f"Turn {data.get('turn_number')} was interrupted mid-flight "
+                    "and never recorded; partial reply preserved in "
+                    "chat_interrupted_turn.json.",
+                )
+            except Exception:  # noqa: BLE001
+                logger.warning("Could not record interrupted-turn system note")
 
     def _active_turn_path(self) -> Path:
         return self._chat_dir() / "chat_active_turn.json"
@@ -132,6 +175,7 @@ class ContinuityPlugin(StatePlugin):
             self._last_partial_write = now
 
     def on_turn_end(self, turn: TurnInfo) -> None:
+        self._state.pop("interrupted_turn", None)
         self._state["last_turn_at"] = turn.updated_at
         self._state["last_user_message"] = turn.user_message
         self._state["last_assistant_reply"] = turn.reply
@@ -158,6 +202,13 @@ class ContinuityPlugin(StatePlugin):
 
         if compact:
             parts = ["## Wake state"]
+            interrupted = self._state.get("interrupted_turn")
+            if interrupted:
+                parts.append(
+                    f"Turn {interrupted.get('turn_number')} was interrupted "
+                    "mid-flight and never recorded; its side effects may exist "
+                    "outside the transcript (see chat_interrupted_turn.json)."
+                )
             if last_session is not None and last_turn is not None:
                 parts.append(
                     f"Last turn: session {last_session}, turn {last_turn}, {last_reason}."
@@ -174,6 +225,19 @@ class ContinuityPlugin(StatePlugin):
             return block
 
         lines = ["## Wake state"]
+
+        interrupted = self._state.get("interrupted_turn")
+        if interrupted:
+            lines.append(
+                "- Previous turn was interrupted mid-flight and never recorded "
+                "— its side effects (commits, edits) may exist outside the "
+                "transcript. Partial draft is preserved in "
+                "chat_interrupted_turn.json."
+            )
+            lines.append(
+                f"  Interrupted turn {interrupted.get('turn_number')}, "
+                f"user asked: {(interrupted.get('user_message') or '')[:80]}"
+            )
 
         instance_started = self._state.get("instance_started_at")
         if instance_started:
@@ -205,21 +269,23 @@ class ContinuityPlugin(StatePlugin):
         last_user = self._state.get("last_user_message", "")
         last_reply = self._state.get("last_assistant_reply", "")
         if last_user or last_reply:
-            lines.append("- You may have been in the middle of:")
+            snippet = []
             if last_user:
-                lines.append(f"  User: {last_user[:120]}")
+                snippet.append(f"user asked: {last_user[:80]}")
             if last_reply:
-                lines.append(f"  Assistant: {last_reply[:120]}")
+                snippet.append(f"you were saying: {last_reply[:80]}")
+            lines.append("- Last exchange: " + "; ".join(snippet))
 
         active_path = self._active_turn_path()
         if active_path.exists():
             try:
                 active = json.loads(active_path.read_text())
-                lines.append("- You may have been about to say:")
-                lines.append(f"  {active.get('message_text', '')[:500]}")
-                if active.get("thought_text"):
-                    lines.append("- Your last thought was:")
-                    lines.append(f"  {active.get('thought_text')[:500]}")
+                message_text = active.get("message_text", "")[:200]
+                thought_text = active.get("thought_text", "")[:200]
+                if message_text:
+                    lines.append(f"- Active turn draft: {message_text}")
+                if thought_text:
+                    lines.append(f"- Active thought: {thought_text}")
             except (json.JSONDecodeError, OSError):
                 pass
 

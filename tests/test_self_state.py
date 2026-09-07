@@ -239,3 +239,54 @@ def test_before_record_turn_preserves_existing_state_when_no_block(
     result = p.before_record_turn(ctx)
     assert result.reply == reply
     assert p._load_state() == "I am focused on the continuity work."
+
+
+def _partial(message_text: str):
+    from diploid_agent.models import PartialTurn
+
+    return PartialTurn(
+        chat_id="chat-1",
+        session_number=1,
+        turn_number=3,
+        user_message="hi",
+        message_text=message_text,
+        updated_at=1.0,
+    )
+
+
+def test_on_partial_saves_complete_self_state_block(tmp_path: Path) -> None:
+    p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
+    p.on_partial(_partial("Working on it.\n<self_state>I am mid-task.</self_state>"))
+    assert p._load_state() == "I am mid-task."
+
+
+def test_on_partial_ignores_incomplete_block(tmp_path: Path) -> None:
+    p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
+    p.on_partial(_partial("Working.\n<self_state>I am still writi"))
+    assert p._load_state() == ""
+    state_path = tmp_path / "chat-1" / "chat_self_state.md"
+    assert not state_path.exists()
+
+
+def test_on_partial_does_not_rewrite_unchanged_note(tmp_path: Path, monkeypatch) -> None:
+    p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
+    p.on_partial(_partial("<self_state>same</self_state>"))
+    calls = []
+    monkeypatch.setattr(p, "_save_state", lambda text: calls.append(text))
+    p.on_partial(_partial("<self_state>same</self_state> more text"))
+    assert calls == []
+
+
+def test_on_partial_saves_latest_block_when_state_changes(tmp_path: Path) -> None:
+    p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
+    p.on_partial(_partial("<self_state>first</self_state>"))
+    p.on_partial(_partial("<self_state>first</self_state> then <self_state>second</self_state>"))
+    assert p._load_state() == "second"
+
+
+def test_on_waking_resets_streamed_note_cache(tmp_path: Path) -> None:
+    p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
+    p.on_partial(_partial("<self_state>cached</self_state>"))
+    assert p._last_streamed_note == "cached"
+    p.on_waking(_wake_context())
+    assert p._last_streamed_note is None
