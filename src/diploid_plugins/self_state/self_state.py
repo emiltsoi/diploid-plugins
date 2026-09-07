@@ -7,26 +7,22 @@ from pathlib import Path
 from typing import Any
 
 from diploid_agent.config import PluginConfig
-from diploid_agent.models import SessionRecord
-from diploid_agent.plugins.base import StatePlugin
+from diploid_agent.plugins.base import StatePlugin, WakeContext
 from diploid_agent.plugins.contexts import RecordTurnContext
 from diploid_agent.runtime.plugin_runtime import PluginRuntime
 
 
 class SelfStatePlugin(StatePlugin):
-    """Save and resume a first-person self-state note across sessions."""
+    """Save and resume a first-person self-state note across sessions.
+
+    The plugin loads the saved note for the agent and reminds it to keep the note
+    up to date, but it never writes the note itself. Only content the agent places
+    inside a ``<self_state>`` block is persisted.
+    """
 
     _SELF_STATE_TAG_RE = re.compile(r"</?self_state>", re.IGNORECASE)
     _HEADER = "## State I am resuming from"
-    _INSTRUCTION = (
-        "At the end of your reply, append a private `<self_state>` block in first "
-        "person, present tense, describing your new state. It will be saved and "
-        "hidden from the user. Example: "
-        "`<self_state>I am warm and curious.</self_state>`"
-    )
-    _INSTRUCTION_LEN = len(_INSTRUCTION)
-    _HEADER_LEN = len(_HEADER)
-    _SEPARATOR_LEN = 4  # two "\n\n" separators
+    _REMINDER = "Update this with a `<self_state>` block when your state changes."
 
     def __init__(
         self,
@@ -37,6 +33,7 @@ class SelfStatePlugin(StatePlugin):
     ) -> None:
         super().__init__(config, chat_id, sessions_root, runtime=runtime)
         self._state_path: Path = self._chat_dir() / self.config.state_file
+        self._remind: bool = True
 
     def _chat_dir(self) -> Path:
         return self.sessions_root / self.chat_id.replace("/", "_")
@@ -50,6 +47,12 @@ class SelfStatePlugin(StatePlugin):
     def _save_state(self, text: str) -> None:
         self._state_path.parent.mkdir(parents=True, exist_ok=True)
         self._state_path.write_text(text, encoding="utf-8")
+
+    def _state_mtime(self) -> float | None:
+        try:
+            return self._state_path.stat().st_mtime
+        except OSError:
+            return None
 
     def _extract_self_state(self, reply: str) -> tuple[str, str | None]:
         # Pair each closing tag with the nearest unmatched opening tag so a
@@ -77,38 +80,49 @@ class SelfStatePlugin(StatePlugin):
         parts.append(reply[pos:])
         return "".join(parts).rstrip(), note
 
-    def _fallback_note(self, record: SessionRecord | None, reply: str) -> str:
-        if record is not None and record.last_stop_reason != "completed":
-            return "I was in the middle of replying when I stopped. I want to continue."
-        snippet = reply.strip()
-        if len(snippet) <= 100:
-            note = f"I just replied to the user: {snippet}"
-        else:
-            note = "I just replied to the user."
-        return note[:200]
+    def on_waking(self, context: WakeContext) -> None:
+        self._remind = True
+
+    def prompt_block_changed(self, since: float | None = None) -> bool | None:
+        if self._remind:
+            return True
+        if since is None:
+            return True
+        mtime = self._state_mtime()
+        if mtime is None:
+            return None
+        return mtime > since
 
     def before_record_turn(self, context: RecordTurnContext) -> RecordTurnContext:
         stripped, note = self._extract_self_state(context.reply)
         if note is not None:
             self._save_state(note)
             context.reply = stripped
-        else:
-            # Only seed an empty state with a fallback note. If the assistant has
-            # already written a meaningful self-state, preserve it across turns
-            # where no `<self_state>` block is provided.
-            if not self._load_state().strip():
-                self._save_state(self._fallback_note(context.record, context.reply))
         return context
 
-    def prompt_block(self, max_chars: int | None = None) -> str | None:
-        note = self._load_state()
-        if not note:
+    def prompt_block(self, max_chars: int | None = None, compact: bool = False) -> str | None:
+        note = self._load_state().strip()
+        remind = self._remind
+        self._remind = False
+
+        if not note and not remind:
             return None
-        block = f"{self._HEADER}\n\n{note}\n\n{self._INSTRUCTION}"
+
+        parts: list[str] = [self._HEADER]
+        if note:
+            parts.append(note)
+        if remind:
+            parts.append(self._REMINDER)
+        block = "\n\n".join(parts)
+
         if max_chars is not None and len(block) > max_chars:
-            note_budget = max_chars - self._HEADER_LEN - self._INSTRUCTION_LEN - self._SEPARATOR_LEN
-            if note_budget > 0:
-                block = f"{self._HEADER}\n\n{note[:note_budget]}\n\n{self._INSTRUCTION}"
+            base_parts = [self._HEADER]
+            if remind:
+                base_parts.append(self._REMINDER)
+            base = "\n\n".join(base_parts)
+            note_budget = max_chars - len(base) - (2 if note else 0)
+            if note and note_budget > 0:
+                block = "\n\n".join(base_parts + [note[:note_budget]])
             else:
                 block = block[:max_chars]
         return block

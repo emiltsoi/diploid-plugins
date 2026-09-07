@@ -6,6 +6,7 @@ from pathlib import Path
 
 from diploid_agent.config import PluginConfig
 from diploid_agent.models import SessionRecord
+from diploid_agent.plugins.base import WakeContext
 from diploid_agent.plugins.contexts import RecordTurnContext
 
 from diploid_plugins.self_state.self_state import SelfStatePlugin
@@ -33,6 +34,18 @@ def _record(last_stop_reason: str | None = "completed") -> SessionRecord:
         created_at=0.0,
         updated_at=0.0,
         last_stop_reason=last_stop_reason,
+    )
+
+
+def _wake_context(record: SessionRecord | None = None) -> WakeContext:
+    return WakeContext(
+        chat_id="chat-1",
+        record=record or _record(),
+        now=0.0,
+        instance_id="i1",
+        instance_started_at=0.0,
+        previous_turn_at=None,
+        pending_dispatches=[],
     )
 
 
@@ -99,36 +112,39 @@ def test_extract_self_state_unmatched_close(tmp_path: Path) -> None:
     assert stripped == reply
 
 
-def test_fallback_note_completed(tmp_path: Path) -> None:
+def test_prompt_block_empty_no_reminder_returns_none(tmp_path: Path) -> None:
     p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
-    note = p._fallback_note(_record("completed"), "short reply")
-    assert "I just replied" in note
-    assert "short reply" in note
-    assert len(note) <= 200
+    p._remind = False
+    assert p.prompt_block() is None
 
 
-def test_fallback_note_partial(tmp_path: Path) -> None:
+def test_prompt_block_on_wake_shows_reminder_for_empty_state(tmp_path: Path) -> None:
     p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
-    for reason in ("timeout", "stopped", "cancelled"):
-        note = p._fallback_note(_record(reason), "partial reply")
-        assert "in the middle" in note
-        assert len(note) <= 200
+    block = p.prompt_block()
+    assert block is not None
+    assert "## State I am resuming from" in block
+    assert "Update this with a `<self_state>` block" in block
 
 
-def test_prompt_block_returns_saved_note_and_instruction(tmp_path: Path) -> None:
+def test_prompt_block_on_wake_includes_note_and_reminder(tmp_path: Path) -> None:
     p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
     p._save_state("I was explaining restarts.")
     block = p.prompt_block()
     assert block is not None
     assert "## State I am resuming from" in block
     assert "I was explaining restarts." in block
-    assert "<self_state>" in block
-    assert "Example:" in block
+    assert "Update this with a `<self_state>` block" in block
 
 
-def test_prompt_block_empty_returns_none(tmp_path: Path) -> None:
+def test_prompt_block_follow_up_includes_note_without_reminder(tmp_path: Path) -> None:
     p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
-    assert p.prompt_block() is None
+    p._save_state("I was explaining restarts.")
+    # First prompt consumes the wake reminder.
+    p.prompt_block()
+    follow_up = p.prompt_block()
+    assert follow_up is not None
+    assert "I was explaining restarts." in follow_up
+    assert "Update this with a `<self_state>` block" not in follow_up
 
 
 def test_prompt_block_caps_at_max_chars(tmp_path: Path) -> None:
@@ -139,7 +155,40 @@ def test_prompt_block_caps_at_max_chars(tmp_path: Path) -> None:
     assert block is not None
     assert len(block) <= 300
     assert "## State I am resuming from" in block
-    assert "At the end of your reply" in block
+    assert "Update this with a `<self_state>` block" in block
+
+
+def test_on_waking_re_enables_reminder(tmp_path: Path) -> None:
+    p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
+    p._save_state("I am focused.")
+    # First prompt consumes the wake reminder.
+    p.prompt_block()
+    follow_up = p.prompt_block()
+    assert "Update this with a `<self_state>` block" not in follow_up
+
+    p.on_waking(_wake_context())
+    reawakened = p.prompt_block()
+    assert reawakened is not None
+    assert "I am focused." in reawakened
+    assert "Update this with a `<self_state>` block" in reawakened
+
+
+def test_prompt_block_changed_detects_state_change(tmp_path: Path) -> None:
+    p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
+    p._save_state("I was explaining restarts.")
+    # The wake reminder is pending, so the block is considered changed.
+    assert p.prompt_block_changed(0.0) is True
+    p._remind = False
+    # The state file has a real mtime and it is newer than the reference time.
+    assert p.prompt_block_changed(0.0) is True
+    # A future reference time means the file has not changed.
+    assert p.prompt_block_changed(9_999_999_999.0) is False
+
+
+def test_prompt_block_changed_no_file_returns_none(tmp_path: Path) -> None:
+    p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
+    p._remind = False
+    assert p.prompt_block_changed(0.0) is None
 
 
 def test_before_record_turn_strips_and_saves(tmp_path: Path) -> None:
@@ -159,7 +208,7 @@ def test_before_record_turn_strips_and_saves(tmp_path: Path) -> None:
     assert state_path.read_text(encoding="utf-8") == "I am focused."
 
 
-def test_before_record_turn_saves_fallback_when_no_block(tmp_path: Path) -> None:
+def test_before_record_turn_leaves_empty_state_empty_when_no_block(tmp_path: Path) -> None:
     p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
     reply = "Plain reply."
     ctx = RecordTurnContext(
@@ -170,8 +219,9 @@ def test_before_record_turn_saves_fallback_when_no_block(tmp_path: Path) -> None
     )
     result = p.before_record_turn(ctx)
     assert result.reply == reply
-    assert p._load_state()
-    assert "I just replied" in p._load_state()
+    assert not p._load_state()
+    state_path = tmp_path / "chat-1" / "chat_self_state.md"
+    assert not state_path.exists()
 
 
 def test_before_record_turn_preserves_existing_state_when_no_block(
