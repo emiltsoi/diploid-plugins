@@ -58,6 +58,19 @@ pip install -e ".[dev]"
 pytest
 ```
 
+## Hot reload
+
+With an editable install, plugin changes go live in a running harness without
+a service restart: `POST /plugin/reload` (or Telegram `/plugin reload <name>`)
+deep-reloads the plugin's whole package subtree — every already-imported
+submodule, then the package itself — and recycles its instances.
+
+Keep module-level code side-effect free: reload re-executes it. Do real work in
+`start()`, release resources in `stop()`. A module that fails to import makes
+the reload raise and leaves the running instances untouched. Changes in code
+outside the plugin's own subtree (e.g. a shared helper package) are not picked
+up — reload each dependent plugin or restart the service.
+
 ## License
 
 [MIT](LICENSE)
