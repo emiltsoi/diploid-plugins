@@ -209,6 +209,19 @@ def test_before_record_turn_strips_and_saves(tmp_path: Path) -> None:
     assert state_path.read_text(encoding="utf-8") == "I am focused."
 
 
+def test_before_record_turn_self_state_only_gets_fallback(tmp_path: Path) -> None:
+    p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
+    ctx = RecordTurnContext(
+        chat_id="chat-1",
+        record=_record(),
+        turn_number=1,
+        reply="<self_state>I am marking the restart test.</self_state>",
+    )
+    result = p.before_record_turn(ctx)
+    assert result.reply == "(self-state marker set)"
+    assert p._load_state() == "I am marking the restart test."
+
+
 def test_before_record_turn_leaves_empty_state_empty_when_no_block(tmp_path: Path) -> None:
     p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
     reply = "Plain reply."

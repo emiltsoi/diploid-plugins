@@ -14,7 +14,7 @@ from diploid_agent.config import (
     PersonaConfig,
     PluginConfig,
 )
-from diploid_agent.models import ChatResult
+from diploid_agent.models import ChatResult, PartialTurn
 from diploid_agent.plugins.base import SleepContext, TurnInfo
 from diploid_agent.plugins.contexts import TurnStartContext
 
@@ -192,6 +192,55 @@ def test_auto_promote_from_memory_block(tmp_path: Path) -> None:
     plugin.after_turn(turn)
     assert len(runtime.promoted) == 1
     assert runtime.promoted[0] == ("chat-1", "We track everything in one repo.")
+
+
+def _partial(message_text: str) -> PartialTurn:
+    return PartialTurn(
+        chat_id="chat-1",
+        session_number=1,
+        turn_number=1,
+        user_message="ok",
+        message_text=message_text,
+        updated_at=1.0,
+    )
+
+
+def test_on_partial_promotes_complete_memory_block(tmp_path: Path) -> None:
+    runtime = FakeRuntime(tmp_path)
+    plugin = PersistentMemoryPlugin(_make_config(tmp_path), "chat-1", tmp_path, runtime=runtime)
+    plugin.before_turn(_turn_start("hi"))
+    plugin.on_partial(_partial("Working.\n```memory\nWe prefer warm restarts.\n```"))
+    assert runtime.promoted == [("chat-1", "We prefer warm restarts.")]
+
+
+def test_on_partial_ignores_incomplete_memory_block(tmp_path: Path) -> None:
+    runtime = FakeRuntime(tmp_path)
+    plugin = PersistentMemoryPlugin(_make_config(tmp_path), "chat-1", tmp_path, runtime=runtime)
+    plugin.before_turn(_turn_start("hi"))
+    plugin.on_partial(_partial("Working.\n```memory\nWe prefer warm"))
+    assert not runtime.promoted
+
+
+def test_after_turn_does_not_double_promote_partial_fact(tmp_path: Path) -> None:
+    runtime = FakeRuntime(tmp_path)
+    plugin = PersistentMemoryPlugin(_make_config(tmp_path), "chat-1", tmp_path, runtime=runtime)
+    plugin.before_turn(_turn_start("hi"))
+    reply = "Done.\n```memory\nWe prefer warm restarts.\n```"
+    plugin.on_partial(_partial(reply))
+    plugin.after_turn(
+        TurnInfo(
+            chat_id="chat-1",
+            session_id="s1",
+            session_number=1,
+            turn_number=1,
+            updated_at=1.0,
+            last_stop_reason=None,
+            user_message="ok",
+            reply=reply,
+            notice=None,
+        )
+    )
+    assert runtime.promoted == [("chat-1", "We prefer warm restarts.")]
 
 
 def test_auto_promote_disabled(tmp_path: Path) -> None:

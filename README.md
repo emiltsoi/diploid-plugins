@@ -7,12 +7,12 @@ These plugins implement the `diploid-agent` plugin contract (`StatePlugin` lifec
 ## Included plugins
 
 - `body` — physical/emotional body state that persists across sessions and transport restarts.
-- `continuity` — wake state, time asleep, last stop reason, and pending dispatches.
+- `continuity` — wake state, time asleep, last stop reason, pending dispatches, and active/interrupted-turn breadcrumbs (`current_intent`/`last_side_effect`).
 - `working_memory` — a chat-scoped scratchpad for the current turn.
-- `persistent_memory` — auto-recall and auto-promote of `memory` blocks.
+- `persistent_memory` — auto-recall and auto-promote of ` ```memory ` blocks, including mid-stream promotion while the reply is still being written.
 - `planner` — turn a user request into an executable plan.
 - `auto_continue` — resume a turn automatically after a configured stop reason.
-- `self_state` — a first-person self-state note across sessions.
+- `self_state` — a first-person self-state note across sessions, with a first-person guard that keeps the previous note if a new block is not written in `I am`/`We are`/`My` form.
 - `self_management` — in-chat plugin enable/disable and approval tools.
 - `curriculum` — language-learning target, unit, and vocabulary tracking.
 - `identity` — self-narrative / identity prompt block.

@@ -70,8 +70,17 @@ class ContinuityPlugin(StatePlugin):
         return datetime.fromtimestamp(when, tz=UTC).isoformat()
 
     def on_waking(self, context: WakeContext) -> None:
+        previous_instance = self._state.get("this_instance_id")
         self._state["last_woken_at"] = context.now
         self._state["this_instance_id"] = context.instance_id
+        self._state["instance_started_at"] = context.instance_started_at
+        rehydration_reason = getattr(context, "rehydration_reason", None)
+        if context.wake_event is not None:
+            self._state["last_wake_event"] = context.wake_event.reason
+        elif rehydration_reason and rehydration_reason != "none":
+            self._state["last_wake_event"] = rehydration_reason
+        else:
+            self._state["last_wake_event"] = "wake"
         if context.previous_turn_at:
             self._state["time_asleep_seconds"] = context.now - context.previous_turn_at
         if context.record:
@@ -84,8 +93,9 @@ class ContinuityPlugin(StatePlugin):
         self._state["pending_dispatches"] = pending
         self._state["had_pending_dispatches"] = bool(pending)
 
-        previous_instance = self._state.get("this_instance_id")
-        self._state["instance_changed"] = previous_instance != context.instance_id
+        self._state["instance_changed"] = (
+            previous_instance is not None and previous_instance != context.instance_id
+        )
 
         self._capture_interrupted_turn()
         self._save_state()
@@ -121,7 +131,10 @@ class ContinuityPlugin(StatePlugin):
             "session_number": data.get("session_number"),
             "user_message": (data.get("user_message") or "")[:200],
             "updated_at": data.get("updated_at"),
+            "current_intent": (data.get("current_intent") or "")[:200],
+            "last_side_effect": (data.get("last_side_effect") or "")[:200],
         }
+        self._save_state()
         if self._runtime is not None:
             try:
                 self._runtime.record_system_note(
@@ -151,6 +164,11 @@ class ContinuityPlugin(StatePlugin):
                     "message_text": partial.message_text,
                     "thought_text": partial.thought_text,
                     "updated_at": partial.updated_at,
+                    # getattr keeps this plugin hot-reloadable onto a harness
+                    # whose PartialTurn predates the breadcrumb fields.
+                    "current_intent": getattr(partial, "current_intent", ""),
+                    "last_side_effect": getattr(partial, "last_side_effect", ""),
+                    "last_side_effect_at": getattr(partial, "last_side_effect_at", 0.0),
                 },
                 indent=2,
                 default=str,
@@ -176,6 +194,7 @@ class ContinuityPlugin(StatePlugin):
         now = partial.updated_at or time.time()
         if now - self._last_partial_write >= self._throttle_seconds:
             self._write_active_turn()
+            self._save_state()
             self._last_partial_write = now
 
     def on_turn_end(self, turn: TurnInfo) -> None:
@@ -246,6 +265,12 @@ class ContinuityPlugin(StatePlugin):
                 f"  Interrupted turn {interrupted.get('turn_number')}, "
                 f"user asked: {(interrupted.get('user_message') or '')[:80]}"
             )
+            intent = interrupted.get("current_intent")
+            if intent:
+                lines.append(f"  Intent: {intent[:120]}")
+            side_effect = interrupted.get("last_side_effect")
+            if side_effect:
+                lines.append(f"  Last side effect: {side_effect[:120]}")
 
         instance_started = self._state.get("instance_started_at")
         if instance_started:
@@ -254,6 +279,12 @@ class ContinuityPlugin(StatePlugin):
             )
         else:
             lines.append(f"- Instance: {instance_id}")
+
+        wake_event = self._state.get("last_wake_event")
+        if wake_event:
+            lines.append(f"- Last wake: {wake_event}")
+        if self._state.get("instance_changed"):
+            lines.append("- Instance changed since previous wake: yes")
 
         if last_session is not None and last_turn is not None:
             lines.append(
@@ -290,6 +321,12 @@ class ContinuityPlugin(StatePlugin):
                 active = json.loads(active_path.read_text())
                 message_text = active.get("message_text", "")[:200]
                 thought_text = active.get("thought_text", "")[:200]
+                intent = active.get("current_intent", "")[:120]
+                side_effect = active.get("last_side_effect", "")[:120]
+                if intent:
+                    lines.append(f"- Active intent: {intent}")
+                if side_effect:
+                    lines.append(f"- Active side effect: {side_effect}")
                 if message_text:
                     lines.append(f"- Active turn draft: {message_text}")
                 if thought_text:

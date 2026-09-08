@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from diploid_agent.config import PluginConfig
-from diploid_agent.models import ChatResult
+from diploid_agent.models import ChatResult, PartialTurn
 from diploid_agent.plugins.base import SleepContext, StatePlugin, TurnInfo
 from diploid_agent.plugins.contexts import TurnStartContext
 from diploid_agent.runtime.plugin_runtime import PluginRuntime
@@ -117,6 +117,14 @@ class PersistentMemoryPlugin(StatePlugin):
     ) -> None:
         super().__init__(config, chat_id, sessions_root, runtime=runtime)
         self._state: dict[str, Any] = self._load_state()
+        self._partial_promoted: set[str] = set()
+
+    @staticmethod
+    def _fact_key(fact: str) -> str:
+        text = fact.strip()
+        while text.startswith("-"):
+            text = text[1:].lstrip()
+        return " ".join(text.split())
 
     def _load_state(self) -> dict[str, Any]:
         state = dict(DEFAULT_STATE)
@@ -194,6 +202,7 @@ class PersistentMemoryPlugin(StatePlugin):
 
     def before_turn(self, context: TurnStartContext) -> TurnStartContext | None:
         self._state["recall_results"] = ""
+        self._partial_promoted = set()
 
         if not self._is_memory_seeking(context.user_message):
             return None
@@ -210,6 +219,22 @@ class PersistentMemoryPlugin(StatePlugin):
             return
         self._runtime.promote(self.chat_id, fact.strip())
 
+    def on_partial(self, partial: PartialTurn) -> None:
+        """Persist complete ```memory blocks as soon as they stream in.
+
+        A mid-turn kill never reaches ``after_turn``; promoting complete blocks
+        here keeps durable facts from dying with the process. ``after_turn``
+        skips keys already promoted during streaming.
+        """
+        if not self.config.config.get("auto_promote", True):
+            return
+        for match in MEMORY_BLOCK_RE.finditer(partial.message_text or ""):
+            fact = match.group(1).strip()
+            key = self._fact_key(fact)
+            if fact and key not in self._partial_promoted:
+                self._promote_fact(fact)
+                self._partial_promoted.add(key)
+
     def after_turn(self, turn: TurnInfo) -> None:
         if not self.config.config.get("auto_promote", True):
             return
@@ -217,8 +242,10 @@ class PersistentMemoryPlugin(StatePlugin):
         changed = False
         for match in MEMORY_BLOCK_RE.finditer(turn.reply):
             fact = match.group(1).strip()
-            if fact:
+            key = self._fact_key(fact)
+            if fact and key not in self._partial_promoted:
                 self._promote_fact(fact)
+                self._partial_promoted.add(key)
                 changed = True
         if changed:
             self._save_state()

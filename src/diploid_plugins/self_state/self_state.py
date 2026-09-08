@@ -144,6 +144,8 @@ class SelfStatePlugin(StatePlugin):
         if note is not None:
             self._maybe_save_state(note)
             context.reply = stripped
+            if not context.reply.strip():
+                context.reply = "(self-state marker set)"
         return context
 
     def prompt_block(self, max_chars: int | None = None, compact: bool = False) -> str | None:
