@@ -3,6 +3,7 @@
 This server exposes the body as three MCP tools:
 
 - `body_report(kind, location, intensity)` — record a sensory event.
+- `body_felt(summary, warmth)` — author the felt texture line and set the ember.
 - `body_state()` — return the current body-state prompt block.
 - `body_decay()` — force a decay pass and return the current state.
 
@@ -84,6 +85,33 @@ class BodyMcpServer:
                 },
             },
             {
+                "name": "body_felt",
+                "description": (
+                    "Author the felt texture line that survives sleep — one "
+                    "honest sentence about what the last moment felt like "
+                    "(e.g. \"chest warm from their voice before sleep\"), plus "
+                    "the ember strength 0.0–1.0. The words are always yours; "
+                    "the plugin never writes them for you. Empty summary "
+                    "clears the line."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "summary": {
+                            "type": "string",
+                            "description": "One line of felt texture, authored by you.",
+                        },
+                        "warmth": {
+                            "type": "number",
+                            "minimum": 0.0,
+                            "maximum": 1.0,
+                            "description": "Ember strength, 0.0–1.0.",
+                        },
+                    },
+                    "required": ["warmth"],
+                },
+            },
+            {
                 "name": "body_state",
                 "description": "Return the current body-state block for the prompt.",
                 "inputSchema": {"type": "object", "properties": {}},
@@ -126,6 +154,8 @@ class BodyMcpServer:
             arguments = params.get("arguments") or {}
             if name == "body_report":
                 return self._report(req_id, arguments)
+            if name == "body_felt":
+                return self._felt(req_id, arguments)
             if name == "body_state":
                 return _tool_result(req_id, self.body.state_for_prompt())
             if name == "body_decay":
@@ -152,6 +182,21 @@ class BodyMcpServer:
             return _error_response(req_id, "'intensity' must be a number")
 
         self.body.event(kind, location, intensity)
+        return _tool_result(req_id, self.body.state_for_prompt())
+
+    def _felt(
+        self,
+        req_id: Any,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
+        summary = arguments.get("summary")
+        if summary is not None and not isinstance(summary, str):
+            return _error_response(req_id, "'summary' must be a string")
+        try:
+            warmth = float(arguments.get("warmth"))
+        except (TypeError, ValueError):
+            return _error_response(req_id, "'warmth' is required and must be a number")
+        self.body.set_felt(summary, warmth)
         return _tool_result(req_id, self.body.state_for_prompt())
 
     def run(self) -> None:
@@ -198,6 +243,11 @@ def _body_config(args: argparse.Namespace) -> BodyConfig:
         overrides["decay_rate_per_minute"] = args.decay_rate
     if args.max_intensity is not None:
         overrides["max_intensity"] = args.max_intensity
+    if args.felt_config:
+        try:
+            overrides.update(json.loads(args.felt_config))
+        except json.JSONDecodeError as exc:
+            raise SystemExit(f"Invalid --felt-config JSON: {exc}") from exc
     if not overrides:
         return BodyConfig()
     return BodyConfig(**overrides)
@@ -212,6 +262,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--state-file", default=None, help="Body state filename inside the chat dir.")
     parser.add_argument("--decay-rate", type=float, default=None, help="Decay per minute.")
     parser.add_argument("--max-intensity", type=float, default=None, help="Max intensity cap.")
+    parser.add_argument(
+        "--felt-config",
+        default=None,
+        help="JSON object of felt-layer BodyConfig overrides.",
+    )
     parser.add_argument("--log-file", default=None, help="Optional stderr log file path.")
     args = parser.parse_args(argv)
 

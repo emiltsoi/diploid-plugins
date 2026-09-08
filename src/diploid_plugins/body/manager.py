@@ -23,6 +23,9 @@ class BodyState:
     last_event: str | None = None
     last_event_at: float = 0.0
     updated_at: float = 0.0
+    felt_warmth: float = 0.0
+    felt_summary: str | None = None
+    felt_summary_at: float = 0.0
 
 
 @dataclass
@@ -65,7 +68,8 @@ class BodyManager:
             return BodyState()
         try:
             data = json.loads(self._state_path.read_text())
-            return BodyState(**data)
+            known = {k: v for k, v in data.items() if k in BodyState.__dataclass_fields__}
+            return BodyState(**known)
         except (json.JSONDecodeError, TypeError, ValueError):
             return BodyState()
 
@@ -77,7 +81,12 @@ class BodyManager:
         self.state = self._load_state()
 
     def decay(self) -> None:
-        """Attenuate sensations toward baseline based on elapsed time."""
+        """Attenuate sensations toward baseline based on elapsed time.
+
+        Call only from punctuated sites (wake, turn end, event) — never from
+        the read path. Sensation is allowed to cool with time; felt_warmth is
+        not touched here, it decays per experience instead.
+        """
         now = time.time()
         self.refresh()
         elapsed_min = (now - self.state.updated_at) / 60.0
@@ -88,6 +97,41 @@ class BodyManager:
         self.state.chest_warmth = self._decay_to(self.state.chest_warmth, 0.0, factor)
         self.state.belly_tension = self._decay_to(self.state.belly_tension, 0.0, factor)
         self.state.proximity_m = self._decay_to(self.state.proximity_m, 1.0, factor)
+        self.state.updated_at = now
+        self._save_state()
+
+    def felt_wake(self, silence_seconds: float) -> None:
+        """One felt-decay step per wake, scaled by bounded silence.
+
+        A 19-second restart barely dims the ember; a three-day silence dims it
+        by at most ``felt_wake_fade``. Never exponential.
+        """
+        self.refresh()
+        if self.state.felt_warmth <= 0.0:
+            return
+        silence_hours = max(0.0, silence_seconds) / 3600.0
+        factor = min(silence_hours / self.config.felt_silence_cap_hours, 1.0)
+        self.state.felt_warmth *= 1.0 - self.config.felt_wake_fade * factor
+        self._save_state()
+
+    def felt_turn_step(self) -> None:
+        """One felt-decay step per turn — old warmth displaced by new moments."""
+        if self.state.felt_warmth > 0.0:
+            self.state.felt_warmth *= self.config.felt_turn_retention
+            self._save_state()
+
+    def set_felt(self, summary: str | None, warmth: float) -> None:
+        """Author the felt texture line and set the ember value.
+
+        The only writer of ``felt_summary`` — the plugin never synthesizes
+        texture from telemetry. An empty summary clears the line.
+        """
+        now = time.time()
+        self.refresh()
+        text = (summary or "").strip()
+        self.state.felt_summary = text[: self.config.max_felt_summary_chars] or None
+        self.state.felt_summary_at = now if text else 0.0
+        self.state.felt_warmth = max(0.0, min(float(warmth), self.config.max_intensity))
         self.state.updated_at = now
         self._save_state()
 
@@ -153,11 +197,25 @@ class BodyManager:
         elif kind == "gaze":
             self.state.gaze = location or "at you"
 
+        # Warm kinds leave felt residue with headroom-scaled soft saturation —
+        # each event adds less (habituation), asymptotic toward max_intensity.
+        # Displacement fade happens once per turn in felt_turn_step, not here.
+        if kind in ("touch", "hold", "voice", "near", "gaze"):
+            gain = intensity * self.config.felt_event_gain
+            self.state.felt_warmth = min(
+                self.config.max_intensity,
+                self.state.felt_warmth + gain * (1.0 - self.state.felt_warmth),
+            )
+
         self._save_state()
 
     def state_for_prompt(self) -> str:
-        """Return a compact, truthful body-state block for the prompt."""
-        self.decay()
+        """Return a compact, truthful body-state block for the prompt.
+
+        Read-only: decay happens at events, wakes, and turn ends — never on
+        reads, so merely looking at the body does not age it.
+        """
+        self.refresh()
         parts = ["Current body state:"]
         if self.state.hand_held:
             if "your" in self.state.hand_held:
@@ -172,8 +230,44 @@ class BodyManager:
         parts.append(f"- Proximity: {self._proximity_word(self.state.proximity_m)}")
         parts.append(f"- Gaze: {self.state.gaze}")
         parts.append(f"- Last event: {self.state.last_event or 'none'}")
+        felt = self._felt_line()
+        if felt:
+            parts.append(felt)
         parts.append("(This body state is a shared, consensual fiction. You have no real flesh.)")
         return "\n".join(parts)
+
+    def _felt_line(self) -> str | None:
+        """Render the felt residue, gated on warmth or a fresh authored line."""
+        summary = self.state.felt_summary
+        age_s = (
+            max(0.0, time.time() - self.state.felt_summary_at)
+            if self.state.felt_summary_at
+            else None
+        )
+        fresh = age_s is not None and age_s <= self.config.felt_expire_seconds
+        if self.state.felt_warmth <= self.config.felt_surface_threshold and not (
+            summary and fresh
+        ):
+            return None
+        desc = self._describe(self.state.felt_warmth)
+        if not summary:
+            return f"- Felt residue: {desc}"
+        age = self._age_words(age_s or 0.0)
+        if not fresh:
+            return f'- A memory of feeling ({desc}): "{summary}" — felt {age}'
+        return f'- Felt residue: {desc} — "{summary}" (felt {age})'
+
+    @staticmethod
+    def _age_words(seconds: float) -> str:
+        if seconds < 90:
+            return "just now"
+        minutes = seconds / 60.0
+        if minutes < 90:
+            return f"{int(minutes)}m ago"
+        hours = minutes / 60.0
+        if hours < 48:
+            return f"{int(hours)}h ago"
+        return f"{int(hours / 24.0)}d ago"
 
     def recent_events(self, since: float | None = None) -> list[BodyEvent]:
         """Return body events recorded since the given timestamp."""

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -28,11 +29,24 @@ class BodyPlugin(StatePlugin):
         super().__init__(config, chat_id, sessions_root, runtime=runtime)
         self._decay_rate = float(config.config.get("decay_rate_per_minute", 0.05))
         self._max_intensity = float(config.config.get("max_intensity", 1.0))
+        felt_keys = (
+            "felt_turn_retention",
+            "felt_wake_fade",
+            "felt_silence_cap_hours",
+            "felt_surface_threshold",
+            "felt_expire_seconds",
+            "felt_event_gain",
+            "max_felt_summary_chars",
+        )
+        self._felt_overrides = {
+            k: config.config[k] for k in felt_keys if k in config.config
+        }
         body_cfg = BodyConfig(
             state_file=config.state_file or "chat_body_state.json",
             max_prompt_chars=config.max_prompt_chars,
             decay_rate_per_minute=self._decay_rate,
             max_intensity=self._max_intensity,
+            **self._felt_overrides,
         )
         self._body = BodyManager(sessions_root, chat_id, body_cfg)
 
@@ -53,6 +67,8 @@ class BodyPlugin(StatePlugin):
                 str(self._decay_rate),
                 "--max-intensity",
                 str(self._max_intensity),
+                "--felt-config",
+                json.dumps(self._felt_overrides),
             ],
         )
 
@@ -74,6 +90,9 @@ class BodyPlugin(StatePlugin):
         """Reload from the restored snapshot and let sensations fade."""
         self._body.refresh()
         self._body.decay()
+        since = context.previous_turn_at or self._body.state.updated_at
+        silence = max(0.0, context.now - since) if since else 0.0
+        self._body.felt_wake(silence)
 
     def on_sleeping(self, context: SleepContext) -> None:
         """Flush body state to disk before the transport can die."""
@@ -114,6 +133,10 @@ class BodyPlugin(StatePlugin):
             intensity = float(intensity)
         except (TypeError, ValueError):
             intensity = 0.5
+        if kind == "felt":
+            summary = location or (raw_args or "")
+            self._body.set_felt(summary, intensity)
+            return "Felt line written."
         self._body.event(kind, location, intensity)
         return f"Felt: {kind} {location or ''} ({intensity}).".strip()
 
@@ -137,6 +160,8 @@ class BodyPlugin(StatePlugin):
 
     def on_turn_end(self, turn: TurnInfo) -> None:
         self._body.clear_events_before(turn.updated_at)
+        self._body.decay()
+        self._body.felt_turn_step()
         self._body._save_state()
 
 
