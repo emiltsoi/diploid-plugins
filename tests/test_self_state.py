@@ -473,3 +473,20 @@ def test_prompt_block_nag_absent_without_reminder(tmp_path: Path) -> None:
     follow_up = p.prompt_block()
     assert follow_up is not None
     assert "No `## next-self` handoff found" not in follow_up
+
+
+def test_next_self_body_stops_at_next_heading(tmp_path: Path) -> None:
+    p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
+    note = "I am here.\n\n## next-self\nThe handoff.\n\n## other\nNot part of it."
+    assert p._next_self_body(note) == "The handoff."
+
+
+def test_carry_forward_excludes_sections_after_next_self(tmp_path: Path) -> None:
+    p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
+    p._save_state(
+        "I am warm.\n\n## next-self\nThe handoff.\n\n## todo\nUnrelated list."
+    )
+    p._maybe_save_state("I am busy.")
+    text = p._load_state()
+    assert "The handoff." in text
+    assert "Unrelated list." not in text

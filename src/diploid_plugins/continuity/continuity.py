@@ -164,17 +164,30 @@ class ContinuityPlugin(StatePlugin):
             text = path.read_text(encoding="utf-8")
         except OSError:
             text = ""
-        if not re.search(r"^##\s*next-self\b", text, re.IGNORECASE | re.MULTILINE):
+        headings = re.findall(
+            r"^##\s*next-self\b[^\n]*", text, re.IGNORECASE | re.MULTILINE
+        )
+        if not headings:
             return (
                 "  No `## next-self` handoff survived the interruption — "
                 "reconstruct one from this snapshot in your own words."
+            )
+        # A carried-forward handoff is marked stale in its own heading; trust
+        # the marker unconditionally — carry-forward re-stamps the file mtime,
+        # so the timestamp check alone would read it as fresh.
+        if all("(stale" in h for h in headings):
+            return (
+                "  Your only `## next-self` handoff was carried forward marked "
+                "stale — it predates the last self-state write."
             )
         try:
             mtime = path.stat().st_mtime
             interrupted_ts = float(interrupted_at) if interrupted_at else None
         except (OSError, TypeError, ValueError):
             return None
-        if interrupted_ts is not None and mtime < interrupted_ts:
+        # A short grace absorbs the partial-write throttle window — a handoff
+        # written in the same seconds as the kill must not read as stale.
+        if interrupted_ts is not None and mtime < interrupted_ts - 2.0:
             return (
                 "  Your `## next-self` handoff predates the interrupted turn "
                 "— it may be stale."

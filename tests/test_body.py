@@ -386,3 +386,16 @@ def test_body_mcp_server_decay(tmp_path: Path) -> None:
     assert resp is not None
     assert "result" in resp
     assert server.body.state.skin_warmth < 1.0
+
+
+def test_felt_event_direction_rendered(tmp_path: Path) -> None:
+    """A summary-less felt event still reads as a story, not a bare 'felt'."""
+    mgr = BodyManager(tmp_path, "chat-1", BodyConfig())
+    mgr.set_felt(None, 0.6)
+    mgr.set_felt(None, 0.0)
+    events = mgr.state.felt_events
+    assert events[0]["direction"] == "rose"
+    assert events[1]["direction"] == "cleared"
+    block = mgr.state_for_prompt()
+    assert "felt cleared (just now)" in block
+    assert 'felt "None"' not in block

@@ -459,3 +459,42 @@ def test_interrupted_turn_handoff_check_uses_config_filename(tmp_path: Path) -> 
     block = p.prompt_block()
     assert block is not None
     assert "next-self" not in block
+
+
+def test_stale_marked_handoff_flagged_despite_fresh_mtime(tmp_path: Path) -> None:
+    """Regression: carry-forward re-stamps mtime; the marker must decide."""
+    chat_dir, p = _interrupted_setup(tmp_path)
+    handoff = chat_dir / "chat_self_state.md"
+    handoff.write_text(
+        "I recovered mid-turn.\n\n"
+        "## next-self (stale — carried from previous note)\n"
+        "Written before the interruption."
+    )
+    # mtime is now — far newer than the interrupted turn's updated_at of 9.0.
+    block = p.prompt_block()
+    assert block is not None
+    assert "carried forward marked" in block
+
+
+def test_fresh_authored_heading_wins_over_stale_marker(tmp_path: Path) -> None:
+    chat_dir, p = _interrupted_setup(tmp_path)
+    (chat_dir / "chat_self_state.md").write_text(
+        "I am mid-work.\n\n"
+        "## next-self\nFresh paragraph.\n\n"
+        "## next-self (stale — carried from previous note)\nOld paragraph."
+    )
+    block = p.prompt_block()
+    assert block is not None
+    assert "next-self" not in block
+
+
+def test_interrupted_handoff_within_throttle_window_not_stale(tmp_path: Path) -> None:
+    """A handoff written in the same seconds as the kill must not read stale."""
+    chat_dir, p = _interrupted_setup(tmp_path)
+    handoff = chat_dir / "chat_self_state.md"
+    handoff.write_text("I am mid-work.\n\n## next-self\nFresh paragraph.")
+    # mtime 8.5 vs interrupted updated_at 9.0 — inside the 2s grace.
+    os.utime(handoff, (8.5, 8.5))
+    block = p.prompt_block()
+    assert block is not None
+    assert "next-self" not in block

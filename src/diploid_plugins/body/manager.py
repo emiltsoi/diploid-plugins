@@ -129,16 +129,26 @@ class BodyManager:
         """
         now = time.time()
         self.refresh()
+        prev = self.state.felt_warmth
         text = (summary or "").strip()
         self.state.felt_summary = text[: self.config.max_felt_summary_chars] or None
         self.state.felt_summary_at = now if text else 0.0
         self.state.felt_warmth = max(0.0, min(float(warmth), self.config.max_intensity))
+        if self.state.felt_warmth <= 0.0 and not text:
+            direction = "cleared"
+        elif self.state.felt_warmth > prev:
+            direction = "rose"
+        elif self.state.felt_warmth < prev:
+            direction = "fell"
+        else:
+            direction = "held"
         self._append_felt_event(
             {
                 "kind": "felt",
                 "location": None,
                 "summary": self.state.felt_summary,
                 "warmth": self.state.felt_warmth,
+                "direction": direction,
                 "at": now,
             }
         )
@@ -303,6 +313,8 @@ class BodyManager:
             if summary:
                 text = str(summary)[:40]
                 label += f' "{text}"'
+            elif entry.get("kind") == "felt" and entry.get("direction"):
+                label += f" {entry['direction']}"
             age = self._age_words(max(0.0, now - float(entry.get("at") or now)))
             rendered.append(f"{label} ({age})")
         return "- Warm moments: " + "; ".join(rendered)

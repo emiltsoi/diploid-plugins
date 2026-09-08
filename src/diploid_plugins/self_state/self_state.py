@@ -31,7 +31,10 @@ class SelfStatePlugin(StatePlugin):
         r")\b",
         re.IGNORECASE,
     )
-    _NEXT_SELF_RE = re.compile(r"^##\s*next-self\b[^\n]*\n?(.*)$", re.IGNORECASE | re.DOTALL | re.MULTILINE)
+    _NEXT_SELF_RE = re.compile(
+        r"^##\s*next-self\b[^\n]*\n?(.*?)(?=^##\s|\Z)",
+        re.IGNORECASE | re.DOTALL | re.MULTILINE,
+    )
     _STALE_NEXT_SELF_HEADER = "## next-self (stale — carried from previous note)"
     _HEADER = "## State I am resuming from"
     _REMINDER = (
