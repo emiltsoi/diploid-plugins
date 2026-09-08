@@ -73,6 +73,10 @@ class ContinuityPlugin(StatePlugin):
     def _format_time(self, when: float) -> str:
         return datetime.fromtimestamp(when, tz=UTC).isoformat()
 
+    _MOMENTUM_WAKE_REASONS: frozenset[str] = frozenset(
+        {"resumed", "stale", "timeout", "transport_error", "restart", "fresh"}
+    )
+
     def on_waking(self, context: WakeContext) -> None:
         previous_instance = self._state.get("this_instance_id")
         self._state["last_woken_at"] = context.now
@@ -102,6 +106,27 @@ class ContinuityPlugin(StatePlugin):
         )
 
         self._capture_interrupted_turn()
+
+        interrupted = self._state.get("interrupted_turn")
+        if interrupted:
+            ended_at = interrupted.get("updated_at")
+            if ended_at:
+                self._state["last_process_ended_at"] = ended_at
+                self._state["last_process_ended_reason"] = "interrupted"
+                self._state["time_asleep_seconds"] = max(
+                    0.0, context.now - float(ended_at)
+                )
+
+        # Closing momentum is due once after a resume/restart/fresh wake, and
+        # not after an ordinary same-session follow-up.
+        if (
+            rehydration_reason in self._MOMENTUM_WAKE_REASONS
+            or self._state.get("instance_changed")
+        ):
+            self._state["last_turn_momentum_due"] = True
+        else:
+            self._state["last_turn_momentum_due"] = False
+
         self._save_state()
 
     def _capture_interrupted_turn(self) -> None:
@@ -152,6 +177,9 @@ class ContinuityPlugin(StatePlugin):
 
     def _active_turn_path(self) -> Path:
         return self._chat_dir() / "chat_active_turn.json"
+
+    def _last_turn_path(self) -> Path:
+        return self._chat_dir() / "chat_last_turn.json"
 
     def _next_self_status(self, interrupted_at: Any) -> str | None:
         """Check whether a `## next-self` handoff survives the interruption.
@@ -220,13 +248,15 @@ class ContinuityPlugin(StatePlugin):
             )
         )
 
-    def _remove_active_turn(self) -> None:
-        path = self._active_turn_path()
-        if path.exists():
-            try:
-                path.unlink()
-            except OSError:
-                pass
+    def _archive_active_turn(self) -> None:
+        """Promote the active-turn snapshot into a closing-momentum record."""
+        active = self._active_turn_path()
+        if not active.exists():
+            return
+        try:
+            active.replace(self._last_turn_path())
+        except OSError:
+            pass
 
     def _flush_active_turn(self) -> None:
         if self._pending_partial is None:
@@ -241,6 +271,10 @@ class ContinuityPlugin(StatePlugin):
             self._write_active_turn()
             self._save_state()
             self._last_partial_write = now
+            # Closing momentum is for the first prompt of a wake; if that
+            # prompt was skipped, the new turn still consumes the flag.
+            if self._state.pop("last_turn_momentum_due", False):
+                self._save_state()
 
     def on_turn_end(self, turn: TurnInfo) -> None:
         self._state.pop("interrupted_turn", None)
@@ -252,11 +286,31 @@ class ContinuityPlugin(StatePlugin):
         self._state["last_stop_reason"] = turn.last_stop_reason
         self._save_state()
         self._flush_active_turn()
-        self._remove_active_turn()
+        self._archive_active_turn()
         self._pending_partial = None
 
     def on_turn_error(self, context: TurnErrorContext) -> None:
         self._flush_active_turn()
+
+    def _last_turn_momentum(self) -> str | None:
+        """Return a one-line closing-momentum note from the last completed turn."""
+        path = self._last_turn_path()
+        if not path.exists():
+            return None
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return None
+        intent = (data.get("current_intent") or "")[:80]
+        side_effect = (data.get("last_side_effect") or "")[:80]
+        if not intent and not side_effect:
+            return None
+        parts = []
+        if intent:
+            parts.append(f"intent: {intent}")
+        if side_effect:
+            parts.append(f"last side effect: {side_effect}")
+        return "- Last turn closed with: " + "; ".join(parts)
 
     def prompt_block(self, max_chars: int | None = None, compact: bool = False) -> str | None:
         # A leftover active-turn snapshot at prompt-build time means the last
@@ -272,6 +326,18 @@ class ContinuityPlugin(StatePlugin):
         last_turn = self._state.get("last_turn_number")
         last_reason = self._state.get("last_stop_reason") or "unknown"
 
+        # Show the closing momentum once after a resume/restart/fresh wake,
+        # and only when the last turn was not interrupted (interrupted block
+        # already covers that).
+        momentum_due = self._state.get("last_turn_momentum_due")
+        interrupted = self._state.get("interrupted_turn")
+        momentum: str | None = None
+        if momentum_due and not interrupted:
+            momentum = self._last_turn_momentum()
+        if momentum_due:
+            self._state["last_turn_momentum_due"] = False
+            self._save_state()
+
         if compact:
             parts = ["## Wake state"]
             interrupted = self._state.get("interrupted_turn")
@@ -285,6 +351,8 @@ class ContinuityPlugin(StatePlugin):
                 parts.append(
                     f"Last turn: session {last_session}, turn {last_turn}, {last_reason}."
                 )
+            if momentum:
+                parts.append(momentum)
             time_asleep = self._state.get("time_asleep_seconds")
             if time_asleep is not None:
                 parts.append(f"Silent for {self._format_duration(time_asleep)}.")
@@ -339,6 +407,8 @@ class ContinuityPlugin(StatePlugin):
                 f"- Last turn: session {last_session}, turn {last_turn}, "
                 f"stop reason {last_reason}, at {self._format_time(last_turn_at)}"
             )
+        if momentum:
+            lines.append(momentum)
 
         time_asleep = self._state.get("time_asleep_seconds")
         if time_asleep is not None:

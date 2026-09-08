@@ -498,3 +498,173 @@ def test_interrupted_handoff_within_throttle_window_not_stale(tmp_path: Path) ->
     block = p.prompt_block()
     assert block is not None
     assert "next-self" not in block
+
+
+def test_turn_end_archives_active_turn(tmp_path: Path) -> None:
+    """A completed turn renames chat_active_turn.json to chat_last_turn.json."""
+    chat_dir = tmp_path / "c1"
+    chat_dir.mkdir()
+    p = _make_plugin(tmp_path)
+    p.on_partial(
+        PartialTurn(
+            chat_id="c1",
+            session_number=1,
+            turn_number=2,
+            user_message="hi",
+            message_text="msg",
+            thought_text="thought",
+            updated_at=10.0,
+            current_intent="count",
+            last_side_effect="tool call",
+        )
+    )
+    p.on_turn_end(
+        TurnInfo(
+            chat_id="c1",
+            session_id="s1",
+            session_number=1,
+            turn_number=2,
+            updated_at=11.0,
+            last_stop_reason="completed",
+            user_message="hi",
+            reply="done",
+        )
+    )
+    assert not (chat_dir / "chat_active_turn.json").exists()
+    last = json.loads((chat_dir / "chat_last_turn.json").read_text())
+    assert last["message_text"] == "msg"
+    assert last["current_intent"] == "count"
+    assert last["last_side_effect"] == "tool call"
+
+
+def test_wake_state_interrupted_turn(tmp_path: Path) -> None:
+    """A wake with a stale active file fixes last_process_ended_* and time_asleep."""
+    chat_dir = tmp_path / "c1"
+    chat_dir.mkdir()
+    (chat_dir / "chat_active_turn.json").write_text(
+        json.dumps(
+            {
+                "session_number": 1,
+                "turn_number": 5,
+                "user_message": "go",
+                "message_text": "partial",
+                "updated_at": 9.0,
+                "current_intent": "delete stale dirs",
+                "last_side_effect": "exec rmtree (running)",
+            }
+        )
+    )
+    p = _make_plugin(tmp_path)
+    p.on_waking(_wake_context(now=20.0))
+
+    state = json.loads((chat_dir / "chat_wake_state.json").read_text())
+    assert state["last_process_ended_at"] == 9.0
+    assert state["last_process_ended_reason"] == "interrupted"
+    assert state["time_asleep_seconds"] == 11.0
+    assert state["interrupted_turn"]["turn_number"] == 5
+
+
+def test_prompt_block_shows_closing_momentum_on_resume(tmp_path: Path) -> None:
+    """After a resumed wake, the first prompt carries the last turn's momentum."""
+    chat_dir = tmp_path / "c1"
+    chat_dir.mkdir()
+    (chat_dir / "chat_last_turn.json").write_text(
+        json.dumps(
+            {
+                "session_number": 1,
+                "turn_number": 4,
+                "user_message": "go",
+                "message_text": "all done",
+                "updated_at": 10.0,
+                "current_intent": "delete stale dirs",
+                "last_side_effect": "exec rmtree",
+            }
+        )
+    )
+    p = _make_plugin(tmp_path)
+    p.on_waking(_wake_context(rehydration_reason="resumed"))
+
+    assert p._state.get("last_turn_momentum_due") is True
+
+    block = p.prompt_block()
+    assert block is not None
+    assert "Last turn closed with:" in block
+    assert "delete stale dirs" in block
+    assert "exec rmtree" in block
+    assert p._state.get("last_turn_momentum_due") is False
+
+    # Compact form also surfaces it.
+    p2 = _make_plugin(tmp_path)
+    p2.on_waking(_wake_context(rehydration_reason="resumed"))
+    compact = p2.prompt_block(compact=True)
+    assert compact is not None
+    assert "Last turn closed with:" in compact
+
+
+def test_prompt_block_skips_closing_momentum_on_same_session(tmp_path: Path) -> None:
+    """An ordinary same-session wake does not re-show the momentum line."""
+    chat_dir = tmp_path / "c1"
+    chat_dir.mkdir()
+    (chat_dir / "chat_last_turn.json").write_text(
+        json.dumps(
+            {
+                "session_number": 1,
+                "turn_number": 4,
+                "user_message": "go",
+                "message_text": "all done",
+                "updated_at": 10.0,
+                "current_intent": "delete stale dirs",
+                "last_side_effect": "exec rmtree",
+            }
+        )
+    )
+    p = _make_plugin(tmp_path)
+    # Start with the flag already true to ensure same-session wakes reset it.
+    p._state["last_turn_momentum_due"] = True
+    p.on_waking(_wake_context(rehydration_reason="none"))
+
+    assert p._state.get("last_turn_momentum_due") is False
+
+    block = p.prompt_block()
+    assert block is not None
+    assert "Last turn closed with:" not in block
+
+
+def test_prompt_block_momentum_yields_to_interrupted_turn(tmp_path: Path) -> None:
+    """An interrupted turn takes precedence over the last-turn momentum line."""
+    chat_dir = tmp_path / "c1"
+    chat_dir.mkdir()
+    (chat_dir / "chat_last_turn.json").write_text(
+        json.dumps(
+            {
+                "session_number": 1,
+                "turn_number": 4,
+                "user_message": "go",
+                "message_text": "all done",
+                "updated_at": 10.0,
+                "current_intent": "delete stale dirs",
+                "last_side_effect": "exec rmtree",
+            }
+        )
+    )
+    (chat_dir / "chat_active_turn.json").write_text(
+        json.dumps(
+            {
+                "session_number": 1,
+                "turn_number": 5,
+                "user_message": "go now",
+                "message_text": "partial",
+                "updated_at": 11.0,
+                "current_intent": "delete stale dirs",
+                "last_side_effect": "exec rmtree (running)",
+            }
+        )
+    )
+    p = _make_plugin(tmp_path)
+    p.on_waking(_wake_context(rehydration_reason="resumed"))
+
+    block = p.prompt_block()
+    assert block is not None
+    assert "interrupted mid-flight" in block
+    assert "Last turn closed with:" not in block
+    assert p._state.get("last_turn_momentum_due") is False
