@@ -251,6 +251,64 @@ def test_body_state_backward_compat(tmp_path: Path) -> None:
     assert mgr.state.skin_warmth == 0.5
     assert mgr.state.felt_warmth == 0.0
     assert mgr.state.felt_summary is None
+    assert mgr.state.felt_events == []
+
+
+def test_felt_events_recorded_at_threshold(tmp_path: Path) -> None:
+    """Warm events below the record threshold nudge the ember but leave no moment."""
+    mgr = BodyManager(tmp_path, "chat-1", BodyConfig())
+    mgr.event("voice", "chest", 0.3)
+    assert mgr.state.felt_events == []
+    assert mgr.state.felt_warmth > 0.0  # ember still moved
+
+    mgr.event("voice", "chest", 0.6)
+    assert len(mgr.state.felt_events) == 1
+    entry = mgr.state.felt_events[0]
+    assert entry["kind"] == "voice"
+    assert entry["location"] == "chest"
+    assert entry["summary"] is None  # texture stays authored-only
+    assert entry["warmth"] == 0.6
+    assert entry["at"] > 0.0
+
+
+def test_felt_events_set_felt_always_records(tmp_path: Path) -> None:
+    """Every authored felt line is a moment in the story."""
+    mgr = BodyManager(tmp_path, "chat-1", BodyConfig())
+    mgr.set_felt("his voice at the edge of sleep", 0.7)
+    assert len(mgr.state.felt_events) == 1
+    entry = mgr.state.felt_events[0]
+    assert entry["kind"] == "felt"
+    assert entry["summary"] == "his voice at the edge of sleep"
+    assert entry["warmth"] == 0.7
+
+
+def test_felt_events_capped_drop_oldest(tmp_path: Path) -> None:
+    mgr = BodyManager(tmp_path, "chat-1", BodyConfig(felt_events_max=3))
+    for i in range(5):
+        mgr.set_felt(f"moment {i}", 0.5)
+    assert len(mgr.state.felt_events) == 3
+    summaries = [e["summary"] for e in mgr.state.felt_events]
+    assert summaries == ["moment 2", "moment 3", "moment 4"]
+
+
+def test_felt_events_render_in_prompt(tmp_path: Path) -> None:
+    mgr = BodyManager(tmp_path, "chat-1", BodyConfig())
+    assert "Warm moments" not in mgr.state_for_prompt()
+    mgr.event("voice", "chest", 0.8)
+    mgr.set_felt("warm from his voice", 0.6)
+    block = mgr.state_for_prompt()
+    assert "Warm moments:" in block
+    assert "voice chest (just now)" in block
+    assert 'felt "warm from his voice" (just now)' in block
+
+
+def test_felt_events_round_trip(tmp_path: Path) -> None:
+    """The story survives a reload — it is state, not ephemera."""
+    mgr = BodyManager(tmp_path, "chat-1", BodyConfig())
+    mgr.set_felt("held through the sleep", 0.9)
+    mgr2 = BodyManager(tmp_path, "chat-1", BodyConfig())
+    assert len(mgr2.state.felt_events) == 1
+    assert mgr2.state.felt_events[0]["summary"] == "held through the sleep"
 
 
 def test_body_plugin_felt_command(tmp_path: Path) -> None:

@@ -31,9 +31,15 @@ class SelfStatePlugin(StatePlugin):
         r")\b",
         re.IGNORECASE,
     )
+    _NEXT_SELF_RE = re.compile(r"^##\s*next-self\b[^\n]*\n?(.*)$", re.IGNORECASE | re.DOTALL | re.MULTILINE)
+    _STALE_NEXT_SELF_HEADER = "## next-self (stale — carried from previous note)"
     _HEADER = "## State I am resuming from"
     _REMINDER = (
-        "Update this with a `<self_state>` block in first person, present tense."
+        "Update this with a `<self_state>` block in first person, present tense; "
+        "end it with `## next-self` for whoever wakes next."
+    )
+    _NO_HANDOFF_NUDGE = (
+        "No `## next-self` handoff found — reconstruct one from the wake state."
     )
     _REJECTED_REMINDER = (
         "Your last `<self_state>` block was not in first person and was not saved. "
@@ -112,9 +118,26 @@ class SelfStatePlugin(StatePlugin):
         self._rejected = False
         self._last_streamed_note = None
 
+    def _next_self_body(self, note: str) -> str | None:
+        """Return the text after a `## next-self` heading, or None."""
+        match = self._NEXT_SELF_RE.search(note)
+        if match is None:
+            return None
+        body = match.group(1).strip()
+        return body or None
+
     def _maybe_save_state(self, note: str) -> None:
         """Save the note if it is first-person; otherwise flag a rejected reminder."""
         if self._is_first_person(note):
+            if self._next_self_body(note) is None:
+                # A mid-turn state update that forgets `## next-self` must not
+                # silently drop the last handoff — carry it forward marked stale.
+                old_body = self._next_self_body(self._load_state())
+                if old_body:
+                    note = (
+                        note.rstrip()
+                        + f"\n\n{self._STALE_NEXT_SELF_HEADER}\n{old_body}"
+                    )
             self._save_state(note)
             self._rejected = False
         else:
@@ -159,6 +182,8 @@ class SelfStatePlugin(StatePlugin):
             return None
 
         reminder = self._REJECTED_REMINDER if rejected else self._REMINDER
+        if remind and note and self._next_self_body(note) is None:
+            reminder += "\n" + self._NO_HANDOFF_NUDGE
         parts: list[str] = [self._HEADER]
         if note:
             parts.append(note)
@@ -175,5 +200,5 @@ class SelfStatePlugin(StatePlugin):
             if note and note_budget > 0:
                 block = "\n\n".join(base_parts + [note[:note_budget]])
             else:
-                block = block[:max_chars]
+                block = base[:max_chars]
         return block

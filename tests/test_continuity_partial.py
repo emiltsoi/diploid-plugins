@@ -1,6 +1,7 @@
 """Tests for partial-turn snapshots in the continuity plugin."""
 
 import json
+import os
 from pathlib import Path
 
 from diploid_agent.config import PluginConfig
@@ -382,3 +383,79 @@ def test_prompt_block_capture_saves_interrupted_state(tmp_path: Path) -> None:
 
     state = json.loads((chat_dir / "chat_wake_state.json").read_text())
     assert state["interrupted_turn"]["turn_number"] == 9
+
+
+def _interrupted_setup(tmp_path: Path) -> tuple[Path, ContinuityPlugin]:
+    """Leave a stale active-turn snapshot and return the woken plugin."""
+    chat_dir = tmp_path / "c1"
+    chat_dir.mkdir()
+    (chat_dir / "chat_active_turn.json").write_text(
+        json.dumps(
+            {
+                "session_number": 1,
+                "turn_number": 5,
+                "user_message": "hi",
+                "message_text": "partial",
+                "updated_at": 9.0,
+            }
+        )
+    )
+    p = _make_plugin(tmp_path)
+    p.on_waking(_wake_context())
+    return chat_dir, p
+
+
+def test_interrupted_turn_nags_when_no_next_self(tmp_path: Path) -> None:
+    _, p = _interrupted_setup(tmp_path)
+    block = p.prompt_block()
+    assert block is not None
+    assert "interrupted mid-flight" in block
+    assert "No `## next-self` handoff survived" in block
+
+
+def test_interrupted_turn_silent_when_fresh_handoff(tmp_path: Path) -> None:
+    chat_dir, p = _interrupted_setup(tmp_path)
+    # Handoff written now — mtime is newer than the interrupted turn's 9.0.
+    (chat_dir / "chat_self_state.md").write_text(
+        "I am mid-work.\n\n## next-self\nPick up turn 5, the draft is partial."
+    )
+    block = p.prompt_block()
+    assert block is not None
+    assert "interrupted mid-flight" in block
+    assert "next-self" not in block
+
+
+def test_interrupted_turn_marks_stale_handoff(tmp_path: Path) -> None:
+    chat_dir, p = _interrupted_setup(tmp_path)
+    handoff = chat_dir / "chat_self_state.md"
+    handoff.write_text("I am mid-work.\n\n## next-self\nOld paragraph.")
+    # Handoff predates the interrupted turn's updated_at of 9.0.
+    os.utime(handoff, (5.0, 5.0))
+    block = p.prompt_block()
+    assert block is not None
+    assert "predates the interrupted turn" in block
+
+
+def test_interrupted_turn_handoff_check_uses_config_filename(tmp_path: Path) -> None:
+    chat_dir = tmp_path / "c1"
+    chat_dir.mkdir()
+    (chat_dir / "chat_active_turn.json").write_text(
+        json.dumps({"turn_number": 5, "user_message": "hi", "updated_at": 9.0})
+    )
+    (chat_dir / "custom_self.md").write_text(
+        "I am here.\n\n## next-self\nFresh handoff."
+    )
+    p = ContinuityPlugin(
+        PluginConfig(
+            name="continuity",
+            enabled=True,
+            state_file="chat_wake_state.json",
+            config={"self_state_file": "custom_self.md"},
+        ),
+        "c1",
+        tmp_path,
+    )
+    p.on_waking(_wake_context())
+    block = p.prompt_block()
+    assert block is not None
+    assert "next-self" not in block

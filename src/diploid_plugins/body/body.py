@@ -37,6 +37,8 @@ class BodyPlugin(StatePlugin):
             "felt_expire_seconds",
             "felt_event_gain",
             "max_felt_summary_chars",
+            "felt_events_max",
+            "felt_event_record_threshold",
         )
         self._felt_overrides = {
             k: config.config[k] for k in felt_keys if k in config.config

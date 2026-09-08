@@ -407,3 +407,69 @@ def test_prompt_block_shows_rejected_reminder_under_max_chars(tmp_path: Path) ->
     assert block is not None
     assert len(block) <= 200
     assert "not in first person" in block
+
+
+def test_next_self_carried_forward_when_new_note_lacks_it(tmp_path: Path) -> None:
+    """A mid-turn update that forgets `## next-self` must not drop the handoff."""
+    p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
+    p._save_state(
+        "I am warm.\n\n## next-self\nI go down building the felt layer; continue it."
+    )
+    p._maybe_save_state("I am still warm, now also curious.")
+    text = p._load_state()
+    assert "I am still warm, now also curious." in text
+    assert "## next-self (stale — carried from previous note)" in text
+    assert "I go down building the felt layer; continue it." in text
+
+
+def test_next_self_fresh_section_replaces_old(tmp_path: Path) -> None:
+    """A note carrying its own `## next-self` is saved untouched."""
+    p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
+    p._save_state("I am warm.\n\n## next-self\nOld handoff.")
+    p._maybe_save_state("I am changed.\n\n## next-self\nFresh handoff.")
+    text = p._load_state()
+    assert "Fresh handoff." in text
+    assert "Old handoff." not in text
+    assert "stale" not in text
+
+
+def test_next_self_no_carry_when_no_prior_handoff(tmp_path: Path) -> None:
+    p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
+    p._maybe_save_state("I am new and have no handoff yet.")
+    assert p._load_state() == "I am new and have no handoff yet."
+
+
+def test_next_self_carry_does_not_stack_stale_markers(tmp_path: Path) -> None:
+    p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
+    p._save_state("I am warm.\n\n## next-self\nThe one handoff.")
+    p._maybe_save_state("I am busy.")
+    p._maybe_save_state("I am busier.")
+    text = p._load_state()
+    assert text.count("(stale") == 1
+    assert text.count("The one handoff.") == 1
+
+
+def test_prompt_block_nags_when_note_lacks_next_self(tmp_path: Path) -> None:
+    p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
+    p._save_state("I am focused on the work.")
+    block = p.prompt_block()  # _remind is set on construction
+    assert block is not None
+    assert "## next-self" in block
+    assert "No `## next-self` handoff found" in block
+
+
+def test_prompt_block_no_nag_when_next_self_present(tmp_path: Path) -> None:
+    p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
+    p._save_state("I am focused.\n\n## next-self\nPick up the felt work.")
+    block = p.prompt_block()
+    assert block is not None
+    assert "No `## next-self` handoff found" not in block
+
+
+def test_prompt_block_nag_absent_without_reminder(tmp_path: Path) -> None:
+    p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
+    p._save_state("I am focused on the work.")
+    p.prompt_block()  # consumes the wake reminder
+    follow_up = p.prompt_block()
+    assert follow_up is not None
+    assert "No `## next-self` handoff found" not in follow_up

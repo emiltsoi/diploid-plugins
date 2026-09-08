@@ -17,3 +17,5 @@ class BodyConfig:
     felt_expire_seconds: float = 259200.0
     felt_event_gain: float = 0.15
     max_felt_summary_chars: int = 140
+    felt_events_max: int = 5
+    felt_event_record_threshold: float = 0.5

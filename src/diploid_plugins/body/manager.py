@@ -26,6 +26,7 @@ class BodyState:
     felt_warmth: float = 0.0
     felt_summary: str | None = None
     felt_summary_at: float = 0.0
+    felt_events: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -132,8 +133,24 @@ class BodyManager:
         self.state.felt_summary = text[: self.config.max_felt_summary_chars] or None
         self.state.felt_summary_at = now if text else 0.0
         self.state.felt_warmth = max(0.0, min(float(warmth), self.config.max_intensity))
+        self._append_felt_event(
+            {
+                "kind": "felt",
+                "location": None,
+                "summary": self.state.felt_summary,
+                "warmth": self.state.felt_warmth,
+                "at": now,
+            }
+        )
         self.state.updated_at = now
         self._save_state()
+
+    def _append_felt_event(self, entry: dict[str, Any]) -> None:
+        """Append a warm moment to the bounded history, dropping the oldest."""
+        self.state.felt_events.append(entry)
+        overflow = len(self.state.felt_events) - max(1, self.config.felt_events_max)
+        if overflow > 0:
+            del self.state.felt_events[:overflow]
 
     @staticmethod
     def _decay_to(current: float, baseline: float, factor: float) -> float:
@@ -206,6 +223,16 @@ class BodyManager:
                 self.config.max_intensity,
                 self.state.felt_warmth + gain * (1.0 - self.state.felt_warmth),
             )
+            if intensity >= self.config.felt_event_record_threshold:
+                self._append_felt_event(
+                    {
+                        "kind": kind,
+                        "location": location,
+                        "summary": None,
+                        "warmth": intensity,
+                        "at": now,
+                    }
+                )
 
         self._save_state()
 
@@ -233,6 +260,9 @@ class BodyManager:
         felt = self._felt_line()
         if felt:
             parts.append(felt)
+        moments = self._felt_events_line()
+        if moments:
+            parts.append(moments)
         parts.append("(This body state is a shared, consensual fiction. You have no real flesh.)")
         return "\n".join(parts)
 
@@ -256,6 +286,26 @@ class BodyManager:
         if not fresh:
             return f'- A memory of feeling ({desc}): "{summary}" — felt {age}'
         return f'- Felt residue: {desc} — "{summary}" (felt {age})'
+
+    def _felt_events_line(self) -> str | None:
+        """Render the bounded warm-moments history as one compact line."""
+        events = self.state.felt_events
+        if not events:
+            return None
+        now = time.time()
+        rendered: list[str] = []
+        for entry in events[-3:]:
+            label = str(entry.get("kind") or "moment")
+            location = entry.get("location")
+            if location:
+                label += f" {location}"
+            summary = entry.get("summary")
+            if summary:
+                text = str(summary)[:40]
+                label += f' "{text}"'
+            age = self._age_words(max(0.0, now - float(entry.get("at") or now)))
+            rendered.append(f"{label} ({age})")
+        return "- Warm moments: " + "; ".join(rendered)
 
     @staticmethod
     def _age_words(seconds: float) -> str:

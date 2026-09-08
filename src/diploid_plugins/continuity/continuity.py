@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -33,6 +34,9 @@ class ContinuityPlugin(StatePlugin):
         self._pending_partial: PartialTurn | None = None
         self._last_partial_write: float = 0.0
         self._throttle_seconds: float = 0.2
+        self._self_state_file: str = str(
+            config.config.get("self_state_file", "chat_self_state.md")
+        )
 
     def state_path(self) -> Path | None:
         if not self.config.state_file:
@@ -148,6 +152,34 @@ class ContinuityPlugin(StatePlugin):
 
     def _active_turn_path(self) -> Path:
         return self._chat_dir() / "chat_active_turn.json"
+
+    def _next_self_status(self, interrupted_at: Any) -> str | None:
+        """Check whether a `## next-self` handoff survives the interruption.
+
+        The self-state note is authored by the agent; this only detects and
+        reports — it never writes the handoff itself.
+        """
+        path = self._chat_dir() / self._self_state_file
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            text = ""
+        if not re.search(r"^##\s*next-self\b", text, re.IGNORECASE | re.MULTILINE):
+            return (
+                "  No `## next-self` handoff survived the interruption — "
+                "reconstruct one from this snapshot in your own words."
+            )
+        try:
+            mtime = path.stat().st_mtime
+            interrupted_ts = float(interrupted_at) if interrupted_at else None
+        except (OSError, TypeError, ValueError):
+            return None
+        if interrupted_ts is not None and mtime < interrupted_ts:
+            return (
+                "  Your `## next-self` handoff predates the interrupted turn "
+                "— it may be stale."
+            )
+        return None
 
     def _write_active_turn(self) -> None:
         if self._pending_partial is None:
@@ -271,6 +303,9 @@ class ContinuityPlugin(StatePlugin):
             side_effect = interrupted.get("last_side_effect")
             if side_effect:
                 lines.append(f"  Last side effect: {side_effect[:120]}")
+            handoff = self._next_self_status(interrupted.get("updated_at"))
+            if handoff:
+                lines.append(handoff)
 
         instance_started = self._state.get("instance_started_at")
         if instance_started:
