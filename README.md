@@ -7,6 +7,7 @@ These plugins implement the `diploid-agent` plugin contract (`StatePlugin` lifec
 ## Included plugins
 
 - `body` — physical/emotional body state that persists across sessions and transport restarts. Includes a felt layer: `felt_warmth` (an ember that fades per wake/turn, not per wall-clock minute — a restart is not an experience) and `felt_summary` (one agent-authored line of texture via the `body_felt` MCP tool; never synthesized from telemetry). Reads are pure — `state_for_prompt` never mutates.
+- `bridge` — writes a first-person BRIDGE at session close and surfaces a short SURFACE re-entry at the next wake. State is sourced from `chat_self_state.md`, `chat_body_state.json`, `chat_working_memory.json`, `chat_PROMOTED.md`, and `chat_TASKS.md`; output is written to `chat_surface.md` and `chat_bridge.md`.
 - `continuity` — wake state, time asleep, last stop reason, pending dispatches, and active/interrupted-turn breadcrumbs (`current_intent`/`last_side_effect`).
 - `working_memory` — a chat-scoped scratchpad for the current turn.
 - `persistent_memory` — auto-recall and auto-promote of ` ```memory ` blocks, including mid-stream promotion while the reply is still being written.
