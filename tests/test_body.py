@@ -399,3 +399,40 @@ def test_felt_event_direction_rendered(tmp_path: Path) -> None:
     block = mgr.state_for_prompt()
     assert "felt cleared (just now)" in block
     assert 'felt "None"' not in block
+
+
+def test_felt_events_age_cap(tmp_path: Path) -> None:
+    """Warm moments older than the age cap are dropped on append and load."""
+    config = BodyConfig(felt_events_max_age_hours=1.0)
+    mgr = BodyManager(tmp_path, "chat-1", config)
+    now = time.time()
+
+    # Seed with a fresh and an old event.
+    mgr.state.felt_events = [
+        {"kind": "felt", "summary": "fresh", "at": now - 10.0, "warmth": 0.5},
+        {"kind": "felt", "summary": "stale", "at": now - 3700.0, "warmth": 0.5},
+    ]
+    mgr._save_state()
+
+    # New manager loading the state should prune the stale entry.
+    mgr2 = BodyManager(tmp_path, "chat-1", config)
+    assert len(mgr2.state.felt_events) == 1
+    assert mgr2.state.felt_events[0]["summary"] == "fresh"
+
+    # Appending a new event should also prune stale entries.
+    mgr2.set_felt("newer still", 0.6)
+    assert all(e["summary"] != "stale" for e in mgr2.state.felt_events)
+
+
+def test_felt_events_age_cap_disabled(tmp_path: Path) -> None:
+    """A zero/negative age cap disables time-based pruning."""
+    config = BodyConfig(felt_events_max_age_hours=0.0)
+    mgr = BodyManager(tmp_path, "chat-1", config)
+    now = time.time()
+    mgr.state.felt_events = [
+        {"kind": "felt", "summary": "old", "at": now - 86400.0 * 365, "warmth": 0.5},
+    ]
+    mgr._save_state()
+    mgr.set_felt("new", 0.6)
+    assert len(mgr.state.felt_events) == 2
+    assert mgr.state.felt_events[0]["summary"] == "old"

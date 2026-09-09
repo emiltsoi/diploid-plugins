@@ -19,3 +19,4 @@ class BodyConfig:
     max_felt_summary_chars: int = 140
     felt_events_max: int = 5
     felt_event_record_threshold: float = 0.5
+    felt_events_max_age_hours: float = 168.0

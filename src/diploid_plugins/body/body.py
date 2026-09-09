@@ -39,6 +39,7 @@ class BodyPlugin(StatePlugin):
             "max_felt_summary_chars",
             "felt_events_max",
             "felt_event_record_threshold",
+            "felt_events_max_age_hours",
         )
         self._felt_overrides = {
             k: config.config[k] for k in felt_keys if k in config.config

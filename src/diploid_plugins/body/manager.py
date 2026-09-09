@@ -70,7 +70,9 @@ class BodyManager:
         try:
             data = json.loads(self._state_path.read_text())
             known = {k: v for k, v in data.items() if k in BodyState.__dataclass_fields__}
-            return BodyState(**known)
+            state = BodyState(**known)
+            state.felt_events = self._prune_felt_events(state.felt_events)
+            return state
         except (json.JSONDecodeError, TypeError, ValueError):
             return BodyState()
 
@@ -157,10 +159,18 @@ class BodyManager:
 
     def _append_felt_event(self, entry: dict[str, Any]) -> None:
         """Append a warm moment to the bounded history, dropping the oldest."""
+        self.state.felt_events = self._prune_felt_events(self.state.felt_events)
         self.state.felt_events.append(entry)
         overflow = len(self.state.felt_events) - max(1, self.config.felt_events_max)
         if overflow > 0:
             del self.state.felt_events[:overflow]
+
+    def _prune_felt_events(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Drop warm moments older than the configured age cap."""
+        if not self.config.felt_events_max_age_hours or self.config.felt_events_max_age_hours <= 0:
+            return list(events)
+        cutoff = time.time() - self.config.felt_events_max_age_hours * 3600.0
+        return [e for e in events if e.get("at", 0) >= cutoff]
 
     @staticmethod
     def _decay_to(current: float, baseline: float, factor: float) -> float:
