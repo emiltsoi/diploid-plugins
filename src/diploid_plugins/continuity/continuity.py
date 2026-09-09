@@ -155,6 +155,16 @@ class ContinuityPlugin(StatePlugin):
             active_path.unlink()
         except OSError:
             return
+        side_effects = data.get("side_effects") or []
+        recent: list[dict[str, Any]] = []
+        for eff in side_effects[-3:]:
+            if isinstance(eff, dict):
+                recent.append(
+                    {
+                        "title": str(eff.get("title") or "tool")[:80],
+                        "status": str(eff.get("status") or "running")[:40],
+                    }
+                )
         self._state["interrupted_turn"] = {
             "turn_number": data.get("turn_number"),
             "session_number": data.get("session_number"),
@@ -162,6 +172,8 @@ class ContinuityPlugin(StatePlugin):
             "updated_at": data.get("updated_at"),
             "current_intent": (data.get("current_intent") or "")[:200],
             "last_side_effect": (data.get("last_side_effect") or "")[:200],
+            "side_effects_count": len(side_effects),
+            "side_effects_recent": recent,
         }
         self._save_state()
         if self._runtime is not None:
@@ -242,6 +254,7 @@ class ContinuityPlugin(StatePlugin):
                     "current_intent": getattr(partial, "current_intent", ""),
                     "last_side_effect": getattr(partial, "last_side_effect", ""),
                     "last_side_effect_at": getattr(partial, "last_side_effect_at", 0.0),
+                    "side_effects": getattr(partial, "side_effects", []),
                 },
                 indent=2,
                 default=str,
@@ -384,6 +397,16 @@ class ContinuityPlugin(StatePlugin):
             side_effect = interrupted.get("last_side_effect")
             if side_effect:
                 lines.append(f"  Last side effect: {side_effect[:120]}")
+            count = interrupted.get("side_effects_count") or 0
+            if count:
+                recent = interrupted.get("side_effects_recent") or []
+                recent_str = ", ".join(
+                    f"{e.get('title')} ({e.get('status')})" for e in recent
+                )
+                lines.append(
+                    f"  Tool trace: {count} step(s) before interruption"
+                    + (f" — {recent_str[:120]}" if recent_str else "")
+                )
             handoff = self._next_self_status(interrupted.get("updated_at"))
             if handoff:
                 lines.append(handoff)

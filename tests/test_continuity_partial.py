@@ -668,3 +668,68 @@ def test_prompt_block_momentum_yields_to_interrupted_turn(tmp_path: Path) -> Non
     assert "interrupted mid-flight" in block
     assert "Last turn closed with:" not in block
     assert p._state.get("last_turn_momentum_due") is False
+
+
+def test_on_partial_writes_side_effects_trace(tmp_path: Path) -> None:
+    chat_dir = tmp_path / "c1"
+    chat_dir.mkdir()
+    p = _make_plugin(tmp_path)
+    p.on_partial(
+        PartialTurn(
+            chat_id="c1",
+            session_number=1,
+            turn_number=2,
+            user_message="hi",
+            message_text="msg so far",
+            thought_text="thinking",
+            updated_at=10.0,
+            current_intent="count to thirty",
+            last_side_effect="exec sleep loop (running)",
+            last_side_effect_at=9.5,
+            side_effects=[
+                {"title": "exec sleep", "status": "running", "at": 9.5},
+                {"title": "edit_file", "status": "completed", "at": 9.6},
+            ],
+        )
+    )
+    active = json.loads((chat_dir / "chat_active_turn.json").read_text())
+    assert active["side_effects"] == [
+        {"title": "exec sleep", "status": "running", "at": 9.5},
+        {"title": "edit_file", "status": "completed", "at": 9.6},
+    ]
+
+
+def test_wake_preserves_side_effects_trace(tmp_path: Path) -> None:
+    """Interrupted turn snapshot preserves the tool-trace list and surfaces it."""
+    chat_dir = tmp_path / "c1"
+    chat_dir.mkdir()
+    (chat_dir / "chat_active_turn.json").write_text(
+        json.dumps(
+            {
+                "session_number": 1,
+                "turn_number": 5,
+                "user_message": "Approved - go ahead",
+                "message_text": "partial reply",
+                "thought_text": "mid work",
+                "updated_at": 9.0,
+                "current_intent": "delete stale tmp dirs",
+                "last_side_effect": "exec rmtree (running)",
+                "side_effects": [
+                    {"title": "exec find", "status": "completed", "at": 8.0},
+                    {"title": "exec rmtree", "status": "running", "at": 9.0},
+                ],
+            }
+        )
+    )
+    p = _make_plugin(tmp_path)
+    p.on_waking(_wake_context())
+
+    preserved = json.loads((chat_dir / "chat_interrupted_turn.json").read_text())
+    assert preserved["side_effects"][1]["title"] == "exec rmtree"
+    assert p._state["interrupted_turn"]["side_effects_count"] == 2
+    assert p._state["interrupted_turn"]["side_effects_recent"][-1]["title"] == "exec rmtree"
+
+    block = p.prompt_block()
+    assert block is not None
+    assert "Tool trace: 2 step(s) before interruption" in block
+    assert "exec rmtree (running)" in block
