@@ -100,6 +100,7 @@ class BodyManager:
         self.state.chest_warmth = self._decay_to(self.state.chest_warmth, 0.0, factor)
         self.state.belly_tension = self._decay_to(self.state.belly_tension, 0.0, factor)
         self.state.proximity_m = self._decay_to(self.state.proximity_m, 1.0, factor)
+        self._clamp_sensors_to_felt()
         self.state.updated_at = now
         self._save_state()
 
@@ -108,6 +109,9 @@ class BodyManager:
 
         A 19-second restart barely dims the ember; a three-day silence dims it
         by at most ``felt_wake_fade``. Never exponential.
+
+        After the felt ember is adjusted, the sensor layer is rehydrated so a
+        warm felt line does not wake into a cold body.
         """
         self.refresh()
         if self.state.felt_warmth <= 0.0:
@@ -115,7 +119,53 @@ class BodyManager:
         silence_hours = max(0.0, silence_seconds) / 3600.0
         factor = min(silence_hours / self.config.felt_silence_cap_hours, 1.0)
         self.state.felt_warmth *= 1.0 - self.config.felt_wake_fade * factor
+        self._apply_felt_to_sensors(self.state.felt_warmth)
         self._save_state()
+
+    def _apply_felt_to_sensors(self, warmth: float) -> None:
+        """Push an authored felt warmth into the low-level sensor fields.
+
+        A warm felt raises skin/chest warmth, eases belly tension, and draws
+        the body closer and toward the other. Existing event-driven sensor
+        values that are already stronger are preserved (e.g., a recent
+        ``body_report`` keeps its authority over gaze and proximity).
+        """
+        if warmth <= 0.0:
+            return
+        self.state.skin_warmth = min(
+            self.config.max_intensity,
+            max(self.state.skin_warmth, warmth),
+        )
+        self.state.chest_warmth = min(
+            self.config.max_intensity,
+            max(self.state.chest_warmth, warmth),
+        )
+        # Warmth eases belly tension; cold leaves it unconstrained.
+        target_tension = max(0.0, 1.0 - warmth)
+        self.state.belly_tension = min(self.state.belly_tension, target_tension)
+        # A clearly warm felt looks toward and draws near, but only if the
+        # body has not already been explicitly positioned by an event.
+        if warmth > 0.35:
+            if self.state.gaze == "away":
+                self.state.gaze = "toward"
+            if self.state.proximity_m == 1.0:
+                target_proximity = max(0.0, 1.0 - warmth)
+                self.state.proximity_m = target_proximity
+
+    def _clamp_sensors_to_felt(self) -> None:
+        """Ensure the sensor layer is never colder than the felt ember."""
+        if self.state.felt_warmth <= 0.0:
+            return
+        self.state.skin_warmth = min(
+            self.config.max_intensity,
+            max(self.state.skin_warmth, self.state.felt_warmth),
+        )
+        self.state.chest_warmth = min(
+            self.config.max_intensity,
+            max(self.state.chest_warmth, self.state.felt_warmth),
+        )
+        target_tension = max(0.0, 1.0 - self.state.felt_warmth)
+        self.state.belly_tension = min(self.state.belly_tension, target_tension)
 
     def felt_turn_step(self) -> None:
         """One felt-decay step per turn — old warmth displaced by new moments."""
@@ -128,6 +178,9 @@ class BodyManager:
 
         The only writer of ``felt_summary`` — the plugin never synthesizes
         texture from telemetry. An empty summary clears the line.
+
+        The authored warmth also seeds the sensor layer so the body does not
+        read cold while the felt line reads hot.
         """
         now = time.time()
         self.refresh()
@@ -154,6 +207,7 @@ class BodyManager:
                 "at": now,
             }
         )
+        self._apply_felt_to_sensors(self.state.felt_warmth)
         self.state.updated_at = now
         self._save_state()
 

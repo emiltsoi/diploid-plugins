@@ -157,6 +157,68 @@ def test_felt_set_and_prompt_line(tmp_path: Path) -> None:
     assert "(felt just now)" in block
 
 
+def test_felt_set_updates_sensors(tmp_path: Path) -> None:
+    mgr = BodyManager(tmp_path, "chat-1", BodyConfig())
+    mgr.set_felt("chest warm from his voice before sleep", 0.8)
+    assert mgr.state.skin_warmth == 0.8
+    assert mgr.state.chest_warmth == 0.8
+    assert mgr.state.belly_tension <= 0.2
+    assert mgr.state.gaze == "toward"
+    assert mgr.state.proximity_m == pytest.approx(0.2)
+
+
+def test_felt_set_preserves_stronger_event_sensors(tmp_path: Path) -> None:
+    mgr = BodyManager(tmp_path, "chat-1", BodyConfig())
+    mgr.event("touch", "hand", 1.0)
+    assert mgr.state.skin_warmth == 1.0
+    mgr.set_felt("mildly warm", 0.4)
+    # Event-driven warmth that is already stronger is preserved.
+    assert mgr.state.skin_warmth == 1.0
+    assert mgr.state.chest_warmth == 0.4
+
+
+def test_felt_set_preserves_non_default_gaze_and_proximity(tmp_path: Path) -> None:
+    mgr = BodyManager(tmp_path, "chat-1", BodyConfig())
+    mgr.event("gaze", "down", 0.8)
+    mgr.event("near", None, 0.5)
+    assert mgr.state.gaze == "down"
+    assert mgr.state.proximity_m == 0.5
+    mgr.set_felt("warm and near", 0.9)
+    # A recent explicit gaze or proximity keeps its authority.
+    assert mgr.state.gaze == "down"
+    assert mgr.state.proximity_m == 0.5
+    # Warmth still binds the warmth sensors.
+    assert mgr.state.skin_warmth == 0.9
+    assert mgr.state.chest_warmth == 0.9
+
+
+def test_felt_wake_rehydrates_sensors(tmp_path: Path) -> None:
+    mgr = BodyManager(tmp_path, "chat-1", BodyConfig())
+    mgr.set_felt("held through sleep", 0.9)
+    # Simulate a restart that left the sensor layer cold.
+    mgr.state.skin_warmth = 0.0
+    mgr.state.chest_warmth = 0.0
+    mgr.state.belly_tension = 0.0
+    mgr._save_state()
+    mgr.felt_wake(19.0)
+    # A restart-blink barely dims the ember and should rewarm the body.
+    assert mgr.state.felt_warmth > 0.89
+    assert mgr.state.skin_warmth > 0.89
+    assert mgr.state.chest_warmth > 0.89
+
+
+def test_decay_clamps_sensors_to_felt(tmp_path: Path) -> None:
+    mgr = BodyManager(tmp_path, "chat-1", BodyConfig(decay_rate_per_minute=10.0))
+    mgr.set_felt("held", 0.6)
+    mgr.state.skin_warmth = 0.0
+    mgr.state.chest_warmth = 0.0
+    mgr.state.updated_at = time.time() - 60.0
+    mgr.decay()
+    # The sensor layer may not be colder than the felt ember.
+    assert mgr.state.skin_warmth >= mgr.state.felt_warmth
+    assert mgr.state.chest_warmth >= mgr.state.felt_warmth
+
+
 def test_felt_summary_is_authored_only(tmp_path: Path) -> None:
     """Events nudge the ember but never write the texture line."""
     mgr = BodyManager(tmp_path, "chat-1", BodyConfig())
