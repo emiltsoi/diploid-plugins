@@ -77,6 +77,8 @@ class CronPlugin(StatePlugin):
             if last_file.name == "service.last":
                 warnings = [str(w) for w in data.get("warnings", [])]
                 continue
+            if data.get("delivery") == "silent" and data.get("status") != "disabled":
+                continue  # files only — but auto-disable always surfaces
             finished = data.get("finished_at") or 0.0
             if stale_after and finished and now - finished > stale_after:
                 continue

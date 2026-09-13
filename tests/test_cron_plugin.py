@@ -14,19 +14,25 @@ def _plugin(tmp_path: Path, **cfg) -> CronPlugin:
     return CronPlugin(config, "chat-1", tmp_path)
 
 
-def _write_last(chat_dir: Path, job: str, status: str, summary: str, ago: float = 0.0) -> None:
+def _write_last(
+    chat_dir: Path,
+    job: str,
+    status: str,
+    summary: str,
+    ago: float = 0.0,
+    delivery: str | None = "digest",
+) -> None:
     cron_dir = chat_dir / "cron"
     cron_dir.mkdir(parents=True, exist_ok=True)
-    (cron_dir / f"{job}.last").write_text(
-        json.dumps(
-            {
-                "job_id": job,
-                "status": status,
-                "finished_at": time.time() - ago,
-                "summary": summary,
-            }
-        )
-    )
+    payload = {
+        "job_id": job,
+        "status": status,
+        "finished_at": time.time() - ago,
+        "summary": summary,
+    }
+    if delivery is not None:
+        payload["delivery"] = delivery
+    (cron_dir / f"{job}.last").write_text(json.dumps(payload))
 
 
 def test_no_results_dir_returns_none(tmp_path: Path) -> None:
@@ -54,6 +60,31 @@ def test_service_warnings_render(tmp_path: Path) -> None:
     )
     block = _plugin(tmp_path).prompt_block()
     assert "! service: crons.yaml: parse error" in block
+
+
+def test_silent_delivery_not_rendered(tmp_path: Path) -> None:
+    chat_dir = tmp_path / "chat-1"
+    _write_last(chat_dir, "quiet", "ok", "housekeeping", delivery="silent")
+    _write_last(chat_dir, "loud", "ok", "news", delivery="digest")
+    block = _plugin(tmp_path).prompt_block()
+    assert block is not None
+    assert "loud" in block
+    assert "quiet" not in block
+
+
+def test_silent_disabled_still_surfaces(tmp_path: Path) -> None:
+    chat_dir = tmp_path / "chat-1"
+    _write_last(chat_dir, "quiet", "disabled", "auto-disabled", delivery="silent")
+    block = _plugin(tmp_path).prompt_block()
+    assert block is not None and "! quiet disabled" in block
+
+
+def test_last_without_delivery_field_renders(tmp_path: Path) -> None:
+    # .last files written before the delivery field existed default to visible.
+    chat_dir = tmp_path / "chat-1"
+    _write_last(chat_dir, "legacy", "ok", "old note", delivery=None)
+    block = _plugin(tmp_path).prompt_block()
+    assert block is not None and "legacy" in block
 
 
 def test_max_chars_cap(tmp_path: Path) -> None:
