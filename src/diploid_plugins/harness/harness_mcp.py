@@ -5,11 +5,18 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 import httpx
 from diploid_agent.mcp_stdio import StdioMcpServer, _error_response, _tool_result
+
+SELF_WAKE_REASON = "self_wake"
+_MAX_REASON_CHARS = 160
+_MAX_MESSAGE_CHARS = 2000
 
 
 class HarnessMcpServer(StdioMcpServer):
@@ -53,6 +60,13 @@ class HarnessMcpServer(StdioMcpServer):
                 resp = self._client.post(path, json=body, headers=self._headers())
             resp.raise_for_status()
             return resp.json()
+        except httpx.HTTPStatusError as exc:
+            detail: object = exc.response.text
+            try:
+                detail = exc.response.json().get("detail", detail)
+            except Exception:  # noqa: BLE001, S110
+                pass
+            return {"error": f"HTTP {exc.response.status_code}: {detail}"}
         except Exception as exc:  # noqa: BLE001
             return {"error": str(exc)}
 
@@ -95,7 +109,145 @@ class HarnessMcpServer(StdioMcpServer):
                     "properties": {},
                 },
             },
+            {
+                "name": "harness_self_wake",
+                "description": (
+                    "Arm a self-wake: the harness starts a turn for this chat at the "
+                    "requested time, delivering your message back to you as if you had "
+                    "sent it to yourself. Provide exactly one of delay_seconds or at "
+                    "(epoch seconds or ISO-8601). The harness rate-limits self-wakes "
+                    "(max pending, min interval between arms, max horizon) — use "
+                    "harness_self_wake_list to inspect armed wakes and "
+                    "harness_self_wake_cancel to retract one."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "reason": {
+                            "type": "string",
+                            "description": "Short why — recorded on the wake event and shown to your future self.",
+                        },
+                        "delay_seconds": {
+                            "type": "number",
+                            "description": "Wake this many seconds from now.",
+                        },
+                        "at": {
+                            "type": ["string", "number"],
+                            "description": "Wake at this time — epoch seconds or ISO-8601.",
+                        },
+                        "message": {
+                            "type": "string",
+                            "description": (
+                                "The instruction your future self receives as the turn's "
+                                "message. Defaults to the reason."
+                            ),
+                        },
+                        "deliver": {
+                            "type": "boolean",
+                            "description": (
+                                "If true, the wake turn's reply is delivered to the user. "
+                                "Default false — the wake runs silently."
+                            ),
+                            "default": False,
+                        },
+                        "priority": {
+                            "type": "integer",
+                            "description": "Wake priority (higher fires first). Default 1.",
+                            "default": 1,
+                        },
+                    },
+                    "required": ["reason"],
+                },
+            },
+            {
+                "name": "harness_self_wake_list",
+                "description": "List this chat's currently armed self-wakes.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
+            {
+                "name": "harness_self_wake_cancel",
+                "description": "Retract an armed self-wake by event id.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "event_id": {
+                            "type": "string",
+                            "description": "The wake event id returned by harness_self_wake.",
+                        },
+                    },
+                    "required": ["event_id"],
+                },
+            },
         ]
+
+    @staticmethod
+    def _parse_at(value: str | float) -> float:
+        """Parse an ``at`` argument: epoch seconds or ISO-8601."""
+        if isinstance(value, (int, float)):
+            return float(value)
+        text = value.strip()
+        try:
+            return float(text)
+        except ValueError:
+            pass
+        dt = datetime.fromisoformat(text.removesuffix("Z") + ("+00:00" if text.endswith("Z") else ""))
+        return dt.timestamp()
+
+    def _self_wake(self, arguments: dict[str, Any], req_id: Any) -> dict[str, Any]:
+        reason = str(arguments.get("reason", "")).strip()
+        if not reason:
+            return _error_response(req_id, "Missing required 'reason' argument.")
+        reason = reason[:_MAX_REASON_CHARS]
+
+        delay = arguments.get("delay_seconds")
+        at = arguments.get("at")
+        if (delay is None) == (at is None):
+            return _error_response(
+                req_id, "Provide exactly one of 'delay_seconds' or 'at'."
+            )
+        try:
+            if delay is not None:
+                scheduled_at = time.time() + float(delay)
+            else:
+                scheduled_at = self._parse_at(at)
+        except (TypeError, ValueError) as exc:
+            return _error_response(req_id, f"Invalid wake time: {exc}")
+
+        message = str(arguments.get("message", "")).strip()[:_MAX_MESSAGE_CHARS]
+        user_message = f"[self-wake: {reason}]"
+        if message:
+            user_message += f"\n{message}"
+
+        deliver = bool(arguments.get("deliver", False))
+        body = {
+            "chat_id": self.chat_id,
+            "reason": SELF_WAKE_REASON,
+            "scheduled_at": scheduled_at,
+            "payload": {
+                "user_message": user_message,
+                "agent_reason": reason,
+                "notify": deliver,
+            },
+            "silent": not deliver,
+            "priority": int(arguments.get("priority", 1)),
+        }
+        result = self._request("POST", "/timer", body)
+        if result.get("error"):
+            return _error_response(req_id, result["error"])
+        return _tool_result(
+            req_id,
+            json.dumps(
+                {
+                    "event_id": result.get("event_id"),
+                    "scheduled_at": scheduled_at,
+                    "fires_in_seconds": round(max(0.0, scheduled_at - time.time()), 1),
+                },
+                ensure_ascii=False,
+            ),
+        )
 
     def _call_tool(
         self,
@@ -111,6 +263,30 @@ class HarnessMcpServer(StdioMcpServer):
                 req_id,
                 json.dumps(result, ensure_ascii=False, default=str),
             )
+
+        if name == "harness_self_wake":
+            return self._self_wake(arguments, req_id)
+
+        if name == "harness_self_wake_list":
+            qs = urlencode({"chat_id": self.chat_id, "reason": SELF_WAKE_REASON})
+            result = self._request("GET", f"/timer/pending?{qs}")
+            if result.get("error"):
+                return _error_response(req_id, result["error"])
+            return _tool_result(
+                req_id,
+                json.dumps(result.get("events", []), ensure_ascii=False, default=str),
+            )
+
+        if name == "harness_self_wake_cancel":
+            event_id = str(arguments.get("event_id", "")).strip()
+            if not event_id:
+                return _error_response(req_id, "Missing required 'event_id' argument.")
+            result = self._request(
+                "POST", "/timer/cancel", {"chat_id": self.chat_id, "event_id": event_id}
+            )
+            if result.get("error"):
+                return _error_response(req_id, result["error"])
+            return _tool_result(req_id, json.dumps(result, ensure_ascii=False))
 
         if name != "harness_subagent":
             return _error_response(req_id, f"Unknown tool: {name}")
