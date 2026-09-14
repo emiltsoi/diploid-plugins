@@ -183,6 +183,19 @@ class HarnessMcpServer(StdioMcpServer):
                 },
             },
             {
+                "name": "harness_cron_list",
+                "description": (
+                    "List this service's cron jobs: id, schedule, next due time, "
+                    "last status and summary, whether one is running, and today's "
+                    "turn-delivery count. Manual firing is the operator's door "
+                    "(POST /cron/<id>/run)."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
+            {
                 "name": "harness_restart",
                 "description": (
                     "Schedule a graceful restart of a harness service unit — "
@@ -360,6 +373,40 @@ class HarnessMcpServer(StdioMcpServer):
             return _tool_result(
                 req_id,
                 json.dumps(result.get("events", []), ensure_ascii=False, default=str),
+            )
+
+        if name == "harness_cron_list":
+            result = self._request("GET", "/cron")
+            if result.get("error"):
+                return _error_response(req_id, result["error"])
+            jobs = [
+                {
+                    "id": job.get("id"),
+                    "enabled": job.get("enabled"),
+                    "source": job.get("source"),
+                    "delivery": job.get("delivery"),
+                    "call_type": job.get("call_type"),
+                    "schedule": job.get("schedule"),
+                    "next_due_at": job.get("next_due_at"),
+                    "last_run_at": job.get("last_run_at"),
+                    "last_status": job.get("last_status"),
+                    "last_summary": job.get("last_summary"),
+                    "running": job.get("running"),
+                    "turns_today": job.get("turns_today"),
+                }
+                for job in result.get("jobs", [])
+            ]
+            return _tool_result(
+                req_id,
+                json.dumps(
+                    {
+                        "enabled": result.get("enabled"),
+                        "jobs": jobs,
+                        "warnings": result.get("warnings", []),
+                    },
+                    ensure_ascii=False,
+                    default=str,
+                ),
             )
 
         if name == "harness_restart":

@@ -218,3 +218,18 @@ def test_restart_without_socket_is_an_error(monkeypatch) -> None:
         "harness_restart", {"service": "missing.service", "reason": "r"}, req_id=1
     )
     assert "error" in resp
+
+
+def test_cron_list_tool_listed() -> None:
+    server = HarnessMcpServer(chat_id="chat-1", harness_url="http://127.0.0.1:1")
+    assert "harness_cron_list" in {t["name"] for t in server._tools()}
+
+
+def test_cron_list_gets_cron_endpoint() -> None:
+    captured: list[dict[str, Any]] = []
+    server = _server(captured)
+    resp = server._call_tool("harness_cron_list", {}, req_id=1)
+    assert captured[0]["method"] == "GET"
+    assert captured[0]["path"] == "/cron"
+    out = _tool_text(resp)
+    assert out["jobs"] == []
