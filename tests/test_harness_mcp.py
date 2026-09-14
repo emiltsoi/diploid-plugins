@@ -160,6 +160,7 @@ def _ctl_socket(tmp_path, monkeypatch, status: str = "scheduled"):
     threading.Thread(target=_serve, daemon=True).start()
     monkeypatch.setenv("DIPLOID_CONTROL_SOCKET", str(path))
     monkeypatch.setenv("DIPLOID_SERVICE_NAME", "vesper.service")
+    monkeypatch.setenv("DIPLOID_CONTROL_TOKEN", "tok-abc")
     return captured
 
 
@@ -182,6 +183,7 @@ def test_restart_posts_to_control_socket(tmp_path, monkeypatch) -> None:
     assert req["service"] == "aurelia.service"
     assert req["reason"] == "she is wedged"
     assert req["chat_id"] == "chat-1"
+    assert req["token"] == "tok-abc"
 
 
 def test_restart_defaults_to_own_service(tmp_path, monkeypatch) -> None:
@@ -210,6 +212,7 @@ def test_restart_gate_rejection_is_an_error(tmp_path, monkeypatch) -> None:
 def test_restart_without_socket_is_an_error(monkeypatch) -> None:
     monkeypatch.delenv("DIPLOID_CONTROL_SOCKET", raising=False)
     monkeypatch.delenv("DIPLOID_SERVICE_NAME", raising=False)
+    monkeypatch.delenv("DIPLOID_CONTROL_TOKEN", raising=False)
     server = _server([])
     resp = server._call_tool(
         "harness_restart", {"service": "missing.service", "reason": "r"}, req_id=1

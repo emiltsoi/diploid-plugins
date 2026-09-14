@@ -319,6 +319,7 @@ class HarnessMcpServer(StdioMcpServer):
                             "command": "restart",
                             "reason": reason,
                             "chat_id": self.chat_id,
+                            "token": os.environ.get("DIPLOID_CONTROL_TOKEN", ""),
                         }
                     ).encode("utf-8")
                 )
