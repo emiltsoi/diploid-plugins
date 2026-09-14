@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import socket
 import time
 from datetime import datetime
 from pathlib import Path
@@ -181,6 +182,39 @@ class HarnessMcpServer(StdioMcpServer):
                     "required": ["event_id"],
                 },
             },
+            {
+                "name": "harness_restart",
+                "description": (
+                    "Schedule a graceful restart of a harness service unit — "
+                    "default: your own service. The unit drains in-flight turns, "
+                    "flushes plugin state, and systemd restarts it after a short "
+                    "delay; your current reply is delivered before the restart "
+                    "fires. IMPORTANT: write your <self_state> handoff BEFORE "
+                    "restarting yourself. Requires the authorship restart_enabled "
+                    "toggle; only allowlisted units are accepted; a reason is "
+                    "required and is recorded for the operator."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "service": {
+                            "type": "string",
+                            "description": (
+                                "Target systemd unit. Defaults to your own service "
+                                "(DIPLOID_SERVICE_NAME)."
+                            ),
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": (
+                                "Why the restart is needed — recorded and shown "
+                                "to the operator."
+                            ),
+                        },
+                    },
+                    "required": ["reason"],
+                },
+            },
         ]
 
     @staticmethod
@@ -249,6 +283,50 @@ class HarnessMcpServer(StdioMcpServer):
             ),
         )
 
+    def _restart(self, arguments: dict[str, Any], req_id: Any) -> dict[str, Any]:
+        reason = str(arguments.get("reason", "")).strip()
+        if not reason:
+            return _error_response(req_id, "Missing required 'reason' argument.")
+        reason = reason[:_MAX_REASON_CHARS]
+        service = str(arguments.get("service", "")).strip() or os.environ.get(
+            "DIPLOID_SERVICE_NAME", ""
+        )
+        if not service:
+            return _error_response(req_id, "No target service known.")
+        sock_path = os.environ.get(
+            "DIPLOID_CONTROL_SOCKET",
+            f"/tmp/diploid-ctl-{service}/control.sock",
+        )
+        if not sock_path:
+            return _error_response(
+                req_id, "No harness control socket in this environment."
+            )
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+                s.settimeout(10.0)
+                s.connect(sock_path)
+                s.sendall(
+                    json.dumps(
+                        {
+                            "action": "restart_service",
+                            "service": service,
+                            "command": "restart",
+                            "reason": reason,
+                            "chat_id": self.chat_id,
+                        }
+                    ).encode("utf-8")
+                )
+                ack = json.loads(s.recv(4096).decode("utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            return _error_response(req_id, f"Control socket request failed: {exc}")
+        status = str(ack.get("status", "unknown"))
+        if status not in {"ok", "scheduled"}:
+            return _error_response(req_id, f"Restart not scheduled: {status}")
+        return _tool_result(
+            req_id,
+            json.dumps({"service": service, "status": status}, ensure_ascii=False),
+        )
+
     def _call_tool(
         self,
         name: str,
@@ -276,6 +354,9 @@ class HarnessMcpServer(StdioMcpServer):
                 req_id,
                 json.dumps(result.get("events", []), ensure_ascii=False, default=str),
             )
+
+        if name == "harness_restart":
+            return self._restart(arguments, req_id)
 
         if name == "harness_self_wake_cancel":
             event_id = str(arguments.get("event_id", "")).strip()

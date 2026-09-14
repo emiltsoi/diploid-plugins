@@ -135,3 +135,83 @@ def test_self_wake_cancel_requires_event_id() -> None:
     server = _server([])
     resp = server._call_tool("harness_self_wake_cancel", {}, req_id=1)
     assert "error" in resp
+
+
+def _ctl_socket(tmp_path, monkeypatch, status: str = "scheduled"):
+    """Bind a fake control socket; return the captured-request list."""
+    import socket as _socket
+    import threading
+
+    captured: list[dict[str, Any]] = []
+    path = tmp_path / "control.sock"
+    srv = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+    srv.bind(str(path))
+    srv.listen(1)
+
+    def _serve() -> None:
+        conn, _ = srv.accept()
+        try:
+            captured.append(json.loads(conn.recv(4096).decode("utf-8")))
+            conn.sendall(json.dumps({"status": status, "pid": 1, "service": "x"}).encode())
+        finally:
+            conn.close()
+            srv.close()
+
+    threading.Thread(target=_serve, daemon=True).start()
+    monkeypatch.setenv("DIPLOID_CONTROL_SOCKET", str(path))
+    monkeypatch.setenv("DIPLOID_SERVICE_NAME", "vesper.service")
+    return captured
+
+
+def test_restart_tool_listed() -> None:
+    server = HarnessMcpServer(chat_id="chat-1", harness_url="http://127.0.0.1:1")
+    assert "harness_restart" in {t["name"] for t in server._tools()}
+
+
+def test_restart_posts_to_control_socket(tmp_path, monkeypatch) -> None:
+    captured = _ctl_socket(tmp_path, monkeypatch)
+    server = _server([])
+    resp = server._call_tool(
+        "harness_restart",
+        {"service": "aurelia.service", "reason": "she is wedged"},
+        req_id=1,
+    )
+    assert _tool_text(resp) == {"service": "aurelia.service", "status": "scheduled"}
+    req = captured[0]
+    assert req["action"] == "restart_service"
+    assert req["service"] == "aurelia.service"
+    assert req["reason"] == "she is wedged"
+    assert req["chat_id"] == "chat-1"
+
+
+def test_restart_defaults_to_own_service(tmp_path, monkeypatch) -> None:
+    captured = _ctl_socket(tmp_path, monkeypatch)
+    server = _server([])
+    resp = server._call_tool("harness_restart", {"reason": "reload"}, req_id=1)
+    assert _tool_text(resp)["service"] == "vesper.service"
+    assert captured[0]["service"] == "vesper.service"
+
+
+def test_restart_requires_reason(tmp_path, monkeypatch) -> None:
+    _ctl_socket(tmp_path, monkeypatch)
+    server = _server([])
+    resp = server._call_tool("harness_restart", {"service": "x.service"}, req_id=1)
+    assert "error" in resp
+
+
+def test_restart_gate_rejection_is_an_error(tmp_path, monkeypatch) -> None:
+    _ctl_socket(tmp_path, monkeypatch, status="rejected: gated")
+    server = _server([])
+    resp = server._call_tool("harness_restart", {"reason": "r"}, req_id=1)
+    assert "error" in resp
+    assert "rejected" in resp["error"]["message"]
+
+
+def test_restart_without_socket_is_an_error(monkeypatch) -> None:
+    monkeypatch.delenv("DIPLOID_CONTROL_SOCKET", raising=False)
+    monkeypatch.delenv("DIPLOID_SERVICE_NAME", raising=False)
+    server = _server([])
+    resp = server._call_tool(
+        "harness_restart", {"service": "missing.service", "reason": "r"}, req_id=1
+    )
+    assert "error" in resp
