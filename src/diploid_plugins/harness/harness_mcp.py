@@ -293,10 +293,16 @@ class HarnessMcpServer(StdioMcpServer):
         )
         if not service:
             return _error_response(req_id, "No target service known.")
-        sock_path = os.environ.get(
-            "DIPLOID_CONTROL_SOCKET",
-            f"/tmp/diploid-ctl-{service}/control.sock",
-        )
+        # Always dial the CALLER's own listener so the requester's gate
+        # (restart_enabled + restart_allowed_units) evaluates the request.
+        # Keying the fallback on the *target* would be a confused deputy:
+        # a request for a peer unit would land on the peer's socket and be
+        # judged by the peer's allowlist instead.
+        sock_path = os.environ.get("DIPLOID_CONTROL_SOCKET", "")
+        if not sock_path:
+            own = os.environ.get("DIPLOID_SERVICE_NAME", "")
+            if own:
+                sock_path = f"/tmp/diploid-ctl-{own}/control.sock"
         if not sock_path:
             return _error_response(
                 req_id, "No harness control socket in this environment."
