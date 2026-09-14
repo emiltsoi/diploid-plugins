@@ -185,10 +185,10 @@ class HarnessMcpServer(StdioMcpServer):
             {
                 "name": "harness_cron_list",
                 "description": (
-                    "List this service's cron jobs: id, schedule, next due time, "
-                    "last status and summary, whether one is running, and today's "
-                    "turn-delivery count. Manual firing is the operator's door "
-                    "(POST /cron/<id>/run)."
+                    "List this service's cron jobs: id, schedule or trigger, "
+                    "next due time, last status and summary, whether one is "
+                    "running, and today's turn-delivery count. Manual firing "
+                    "is the operator's door (POST /cron/<id>/run)."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -220,8 +220,7 @@ class HarnessMcpServer(StdioMcpServer):
                         "reason": {
                             "type": "string",
                             "description": (
-                                "Why the restart is needed — recorded and shown "
-                                "to the operator."
+                                "Why the restart is needed — recorded and shown to the operator."
                             ),
                         },
                     },
@@ -240,7 +239,9 @@ class HarnessMcpServer(StdioMcpServer):
             return float(text)
         except ValueError:
             pass
-        dt = datetime.fromisoformat(text.removesuffix("Z") + ("+00:00" if text.endswith("Z") else ""))
+        dt = datetime.fromisoformat(
+            text.removesuffix("Z") + ("+00:00" if text.endswith("Z") else "")
+        )
         return dt.timestamp()
 
     def _self_wake(self, arguments: dict[str, Any], req_id: Any) -> dict[str, Any]:
@@ -252,9 +253,7 @@ class HarnessMcpServer(StdioMcpServer):
         delay = arguments.get("delay_seconds")
         at = arguments.get("at")
         if (delay is None) == (at is None):
-            return _error_response(
-                req_id, "Provide exactly one of 'delay_seconds' or 'at'."
-            )
+            return _error_response(req_id, "Provide exactly one of 'delay_seconds' or 'at'.")
         try:
             if delay is not None:
                 scheduled_at = time.time() + float(delay)
@@ -317,9 +316,7 @@ class HarnessMcpServer(StdioMcpServer):
             if own:
                 sock_path = f"/tmp/diploid-ctl-{own}/control.sock"
         if not sock_path:
-            return _error_response(
-                req_id, "No harness control socket in this environment."
-            )
+            return _error_response(req_id, "No harness control socket in this environment.")
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
                 s.settimeout(10.0)
@@ -387,6 +384,8 @@ class HarnessMcpServer(StdioMcpServer):
                     "delivery": job.get("delivery"),
                     "call_type": job.get("call_type"),
                     "schedule": job.get("schedule"),
+                    "trigger": job.get("trigger"),
+                    "trigger_state": job.get("trigger_state"),
                     "next_due_at": job.get("next_due_at"),
                     "last_run_at": job.get("last_run_at"),
                     "last_status": job.get("last_status"),
@@ -457,7 +456,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="diploid-harness MCP server")
     parser.add_argument("--chat-id", required=True)
     parser.add_argument("--harness-url", default="http://127.0.0.1:4003")
-    parser.add_argument("--sessions-root", default=str(Path.home() / ".local" / "share" / "diploid"))
+    parser.add_argument(
+        "--sessions-root", default=str(Path.home() / ".local" / "share" / "diploid")
+    )
     args = parser.parse_args()
 
     server = HarnessMcpServer(
