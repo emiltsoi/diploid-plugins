@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -187,15 +189,20 @@ class SelfStatePlugin(StatePlugin):
         reminder = self._REJECTED_REMINDER if rejected else self._REMINDER
         if remind and note and self._next_self_body(note) is None:
             reminder += "\n" + self._NO_HANDOFF_NUDGE
+        appends = self._appends_line()
         parts: list[str] = [self._HEADER]
         if note:
             parts.append(note)
+        if appends:
+            parts.append(appends)
         if remind:
             parts.append(reminder)
         block = "\n\n".join(parts)
 
         if max_chars is not None and len(block) > max_chars:
             base_parts = [self._HEADER]
+            if appends:
+                base_parts.append(appends)
             if remind:
                 base_parts.append(reminder)
             base = "\n\n".join(base_parts)
@@ -205,3 +212,27 @@ class SelfStatePlugin(StatePlugin):
             else:
                 block = base[:max_chars]
         return block
+
+    def _appends_line(self) -> str | None:
+        """Surface the bounded-self-writes append counter — a nudge, not a gate.
+
+        The counter is fed quietly by cron file-triggers on the memory files
+        (see the persona's crons.yaml); this line is the slot the negotiated
+        design promised to expose it in.
+        """
+        path = self.sessions_root / "daily_appends.json"
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return None
+        day = (data.get("days") or {}).get(time.strftime("%Y-%m-%d")) or {}
+        persona = int(day.get("persona") or 0)
+        chat = int(day.get(f"chat:{self.chat_id}") or 0)
+        if not persona and not chat:
+            return None
+        budget = int(self.config.config.get("memory_append_budget", 10))
+        over = " — over soft budget; compact before more" if max(persona, chat) > budget else ""
+        return (
+            f"Memory appends today: MEMORY.md {persona}/{budget}, "
+            f"chat {chat}/{budget}{over}."
+        )
