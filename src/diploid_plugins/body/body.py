@@ -8,8 +8,10 @@ from pathlib import Path
 from typing import Any
 
 from diploid_agent.config import McpServerConfig, PluginConfig
+from diploid_agent.context.token_estimator import TokenEstimator
 from diploid_agent.memory import MemoryItem
 from diploid_agent.plugins.base import SleepContext, StatePlugin, TurnInfo, WakeContext
+from diploid_agent.plugins.contexts import TurnStartContext
 from diploid_agent.runtime.plugin_runtime import PluginRuntime
 
 from diploid_plugins.body.config import BodyConfig
@@ -101,9 +103,24 @@ class BodyPlugin(StatePlugin):
         """Flush body state to disk before the transport can die."""
         self._body._save_state()
 
+    def before_turn(self, context: TurnStartContext) -> TurnStartContext | None:
+        """Stamp derived context-pressure — the harness's truth as a body field."""
+        if self._runtime is None or context.record is None:
+            return None
+        try:
+            pressure = TokenEstimator(self._runtime.config).context_pressure(context.record)
+        except Exception:  # noqa: BLE001 — a derived field must never break a turn
+            return None
+        if pressure.get("context_window"):
+            self._body.set_derived("context_pressure", float(pressure.get("input_ratio") or 0.0))
+        return None
+
     def prompt_block(self, max_chars: int | None = None) -> str | None:
-        body_map = self._body_map_text()
-        state = self._body.state_for_prompt()
+        # Attention is the budget consumer: a body attending elsewhere earns a
+        # slim block and skips the canonical map entirely.
+        slim = self._body.attention_value() == "background"
+        body_map = None if slim else self._body_map_text()
+        state = self._body.state_for_prompt(slim=slim)
         text = f"{body_map}\n\n{state}" if body_map else state
         if not text:
             return None
@@ -121,6 +138,10 @@ class BodyPlugin(StatePlugin):
         kind = event
         if not kind:
             return "Usage: /state body <kind> [location] [intensity]"
+        if kind in ("energy", "mood_tint", "mood", "attention"):
+            field = "mood_tint" if kind == "mood" else kind
+            value = raw_args or params.get("location") or params.get("value")
+            return self._body.set_self_report(field, value, params.get("scope"))
         location = params.get("location")
         intensity = params.get("intensity", 0.5)
         if raw_args:

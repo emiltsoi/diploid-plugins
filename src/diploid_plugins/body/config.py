@@ -20,3 +20,13 @@ class BodyConfig:
     felt_events_max: int = 5
     felt_event_record_threshold: float = 0.5
     felt_events_max_age_hours: float = 168.0
+    # Richer body-state (negotiated design): persona-scope file for the fields
+    # that belong to the one body — energy, mood_tint, and the persona
+    # attention fallback. Per-chat files hold attention + derived fields.
+    persona_state_file: str = "persona_body_state.json"
+    energy_baseline: float = 0.5  # self-reported energy drifts toward "steady"
+    self_report_drift_per_minute: float = 0.02  # exp drift rate toward baseline
+    attention_stale_seconds: float = 7200.0  # stale attention drifts to "scattered"
+    field_stale_seconds: float = 14400.0  # prompt dims fields older than this
+    fatigue_rise_cap_hours: float = 10.0  # hours of wake to reach fatigue 1.0
+    fatigue_rest_cap_hours: float = 8.0  # hours of silence for full recovery

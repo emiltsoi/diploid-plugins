@@ -112,6 +112,33 @@ class BodyMcpServer:
                 },
             },
             {
+                "name": "body_self_report",
+                "description": (
+                    "Author a self-reported body field — what you feel, you report. "
+                    "Fields: energy (0.0–1.0 or low/steady/high; persona-wide), "
+                    "mood_tint (free-form color word; persona-wide), attention "
+                    "(focused|drifting|background; per-chat, or scope='persona' "
+                    "for the fallback). The words are always yours."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "field": {
+                            "type": "string",
+                            "description": "energy | mood_tint | attention",
+                        },
+                        "value": {
+                            "description": "Field value — number, word, or free text.",
+                        },
+                        "scope": {
+                            "type": "string",
+                            "description": "attention only: 'chat' (default) or 'persona'.",
+                        },
+                    },
+                    "required": ["field", "value"],
+                },
+            },
+            {
                 "name": "body_state",
                 "description": "Return the current body-state block for the prompt.",
                 "inputSchema": {"type": "object", "properties": {}},
@@ -156,6 +183,8 @@ class BodyMcpServer:
                 return self._report(req_id, arguments)
             if name == "body_felt":
                 return self._felt(req_id, arguments)
+            if name == "body_self_report":
+                return self._self_report(req_id, arguments)
             if name == "body_state":
                 return _tool_result(req_id, self.body.state_for_prompt())
             if name == "body_decay":
@@ -198,6 +227,22 @@ class BodyMcpServer:
             return _error_response(req_id, "'warmth' is required and must be a number")
         self.body.set_felt(summary, warmth)
         return _tool_result(req_id, self.body.state_for_prompt())
+
+    def _self_report(
+        self,
+        req_id: Any,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
+        field = arguments.get("field")
+        if not field or not isinstance(field, str):
+            return _error_response(req_id, "'field' is required and must be a string")
+        if "value" not in arguments:
+            return _error_response(req_id, "'value' is required")
+        scope = arguments.get("scope")
+        if scope is not None and not isinstance(scope, str):
+            return _error_response(req_id, "'scope' must be a string")
+        message = self.body.set_self_report(field, arguments.get("value"), scope)
+        return _tool_result(req_id, f"{message}\n\n{self.body.state_for_prompt()}")
 
     def run(self) -> None:
         """Read JSON-RPC messages from stdin and write responses to stdout."""
