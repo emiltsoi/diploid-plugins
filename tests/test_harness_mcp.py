@@ -48,7 +48,7 @@ def test_self_wake_posts_timer_event() -> None:
     assert out["fires_in_seconds"] > 590
 
     assert captured[0]["method"] == "POST"
-    assert captured[0]["path"] == "/timer"
+    assert captured[0]["path"] == "/timer/self"
     body = captured[0]["body"]
     assert body["reason"] == "self_wake"
     assert body["chat_id"] == "chat-1"

@@ -280,7 +280,9 @@ class HarnessMcpServer(StdioMcpServer):
             "silent": not deliver,
             "priority": int(arguments.get("priority", 1)),
         }
-        result = self._request("POST", "/timer", body)
+        # Agent wakes go through the dedicated door: budgets and the
+        # authorship toggle apply regardless of the reason string.
+        result = self._request("POST", "/timer/self", body)
         if result.get("error"):
             return _error_response(req_id, result["error"])
         return _tool_result(
