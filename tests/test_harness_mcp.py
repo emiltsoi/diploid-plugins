@@ -259,3 +259,97 @@ def test_cron_list_passes_trigger_fields() -> None:
     assert job["trigger"]["type"] == "file"
     assert job["trigger_state"]["seen_mtime"] == 1.0
     assert job["schedule"] is None
+
+
+def _server_with(result: Any) -> tuple[HarnessMcpServer, list[dict[str, Any]]]:
+    captured: list[dict[str, Any]] = []
+    server = HarnessMcpServer(chat_id="chat-1", harness_url="http://127.0.0.1:1")
+
+    def fake_request(method: str, path: str, body: dict[str, Any] | None = None):
+        captured.append({"method": method, "path": path, "body": body})
+        return result
+
+    server._request = fake_request  # type: ignore[method-assign]
+    return server, captured
+
+
+def test_plan_tools_listed() -> None:
+    server = HarnessMcpServer(chat_id="chat-1", harness_url="http://127.0.0.1:1")
+    names = {t["name"] for t in server._tools()}
+    assert {"plan_create", "plan_list", "plan_task_start", "plan_task_done", "plan_task_fail"} <= names
+
+
+def test_plan_create_posts_with_noop_default() -> None:
+    server, captured = _server_with({"id": "plan-1", "ok": True})
+    resp = server._call_tool(
+        "plan_create",
+        {
+            "name": "board-test",
+            "tasks": [{"name": "a"}, {"name": "b", "type": "shell"}],
+        },
+        req_id=1,
+    )
+    assert "error" not in resp
+    assert captured[0]["method"] == "POST"
+    assert captured[0]["path"] == "/plan/create"
+    body = captured[0]["body"]
+    assert body["chat_id"] == "chat-1"
+    assert body["origin"] == "agent"
+    assert body["tasks"][0]["type"] == "noop"
+    assert body["tasks"][1]["type"] == "shell"
+
+
+def test_plan_create_requires_name() -> None:
+    server, captured = _server_with({"ok": True})
+    resp = server._call_tool("plan_create", {"tasks": [{"name": "a"}]}, req_id=1)
+    assert "error" in resp
+    assert not captured
+
+
+def test_plan_list_filters_to_chat() -> None:
+    server, captured = _server_with(
+        [
+            {"id": "p1", "chat_id": "chat-1", "name": "mine"},
+            {"id": "p2", "chat_id": "other", "name": "theirs"},
+            {"id": "p3", "chat_id": None, "name": "cron"},
+        ]
+    )
+    resp = server._call_tool("plan_list", {}, req_id=1)
+    out = _tool_text(resp)
+    assert [p["id"] for p in out] == ["p1"]
+    assert captured[0]["method"] == "GET"
+    assert captured[0]["path"] == "/plan/list"
+
+
+def test_plan_task_transitions() -> None:
+    server, captured = _server_with({"ok": True})
+    server._call_tool("plan_task_start", {"plan_id": "p1"}, req_id=1)
+    assert captured[0] == {
+        "method": "POST",
+        "path": "/plan/task/start",
+        "body": {"plan_id": "p1"},
+    }
+
+    server._call_tool(
+        "plan_task_done",
+        {"plan_id": "p1", "task_id": "t1", "result": "shipped"},
+        req_id=2,
+    )
+    assert captured[1]["path"] == "/plan/task/done"
+    assert captured[1]["body"]["result"] == "shipped"
+    assert captured[1]["body"]["log"] == ""
+
+    server._call_tool(
+        "plan_task_fail",
+        {"plan_id": "p1", "task_id": "t1", "log": "abandoned"},
+        req_id=3,
+    )
+    assert captured[2]["path"] == "/plan/task/fail"
+    assert captured[2]["body"]["log"] == "abandoned"
+
+
+def test_plan_task_done_requires_task_id() -> None:
+    server, captured = _server_with({"ok": True})
+    resp = server._call_tool("plan_task_done", {"plan_id": "p1"}, req_id=1)
+    assert "error" in resp
+    assert not captured

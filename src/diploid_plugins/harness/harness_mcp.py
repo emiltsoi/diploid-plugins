@@ -9,7 +9,7 @@ import socket
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 from urllib.parse import urlencode
 
 import httpx
@@ -183,6 +183,119 @@ class HarnessMcpServer(StdioMcpServer):
                 },
             },
             {
+                "name": "plan_create",
+                "description": (
+                    "Create a plan for this chat — a task list that renders live on the "
+                    "chat's Telegram task board and persists across turns. Use for "
+                    "visible multi-step work. Tasks default to type 'noop' (checklist "
+                    "semantics): starting a 'noop' task only marks it running. Passing "
+                    "an explicit type like 'shell' or 'acp' makes the task REALLY "
+                    "EXECUTE on start — only do that deliberately."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Plan name — shown as the board header.",
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "Optional longer description.",
+                        },
+                        "tasks": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {"type": "string"},
+                                    "description": {"type": "string"},
+                                    "type": {
+                                        "type": "string",
+                                        "description": (
+                                            "Task type. Default 'noop' (checklist only). "
+                                            "'shell'/'acp'/'subagent' really execute when "
+                                            "started — pass only deliberately."
+                                        ),
+                                        "default": "noop",
+                                    },
+                                },
+                                "required": ["name"],
+                            },
+                            "description": "Initial task list (can be empty).",
+                        },
+                    },
+                    "required": ["name"],
+                },
+            },
+            {
+                "name": "plan_list",
+                "description": (
+                    "List this chat's plans — id, name, status, origin, and tasks. "
+                    "Use to find a plan_id for plan_task_start/done/fail."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
+            {
+                "name": "plan_task_start",
+                "description": (
+                    "Mark a task in a plan as running (starts the first ready task when "
+                    "task_id is omitted). WARNING: for 'shell'/'acp'/'subagent' tasks "
+                    "this REALLY EXECUTES the task. For default 'noop' tasks it only "
+                    "updates the checklist."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "plan_id": {"type": "string"},
+                        "task_id": {
+                            "type": "string",
+                            "description": "Task to start; omit to start the first ready task.",
+                        },
+                    },
+                    "required": ["plan_id"],
+                },
+            },
+            {
+                "name": "plan_task_done",
+                "description": "Mark a plan task as done, with an optional result note.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "plan_id": {"type": "string"},
+                        "task_id": {"type": "string"},
+                        "result": {
+                            "type": "string",
+                            "description": "Short result note recorded on the task.",
+                        },
+                        "log": {"type": "string"},
+                    },
+                    "required": ["plan_id", "task_id"],
+                },
+            },
+            {
+                "name": "plan_task_fail",
+                "description": (
+                    "Mark a plan task as failed — the honest 'didn't finish' door. "
+                    "Prefer this over leaving a task stuck when the work is abandoned."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "plan_id": {"type": "string"},
+                        "task_id": {"type": "string"},
+                        "log": {
+                            "type": "string",
+                            "description": "Why the task failed or was abandoned.",
+                        },
+                    },
+                    "required": ["plan_id", "task_id"],
+                },
+            },
+            {
                 "name": "harness_cron_list",
                 "description": (
                     "List this service's cron jobs: id, schedule or trigger, "
@@ -296,6 +409,70 @@ class HarnessMcpServer(StdioMcpServer):
                 ensure_ascii=False,
             ),
         )
+
+    def _plan_create(self, arguments: dict[str, Any], req_id: Any) -> dict[str, Any]:
+        name = str(arguments.get("name", "")).strip()
+        if not name:
+            return _error_response(req_id, "Missing required 'name' argument.")
+        tasks = []
+        for t in arguments.get("tasks") or []:
+            tasks.append(
+                {
+                    "name": str(t.get("name", "")),
+                    "description": str(t.get("description", "")),
+                    # Checklist semantics by default: 'noop' tasks only mark
+                    # state. Executable types must be passed deliberately.
+                    "type": str(t.get("type") or "noop"),
+                }
+            )
+        body = {
+            "name": name,
+            "description": str(arguments.get("description", "")),
+            "chat_id": self.chat_id,
+            "origin": "agent",
+            "tasks": tasks,
+        }
+        result = self._request("POST", "/plan/create", body)
+        if isinstance(result, dict) and result.get("error"):
+            return _error_response(req_id, result["error"])
+        return _tool_result(req_id, json.dumps(result, ensure_ascii=False, default=str))
+
+    def _plan_list(self, req_id: Any) -> dict[str, Any]:
+        result = self._request("GET", "/plan/list")
+        if isinstance(result, dict) and result.get("error"):
+            return _error_response(req_id, result["error"])
+        plans = result if isinstance(result, list) else []
+        plans = [p for p in plans if p.get("chat_id") == self.chat_id]
+        return _tool_result(req_id, json.dumps(plans, ensure_ascii=False, default=str))
+
+    _PLAN_TRANSITION_PATHS: ClassVar[dict[str, str]] = {
+        "plan_task_start": "/plan/task/start",
+        "plan_task_done": "/plan/task/done",
+        "plan_task_fail": "/plan/task/fail",
+    }
+
+    def _plan_task_transition(
+        self, name: str, arguments: dict[str, Any], req_id: Any
+    ) -> dict[str, Any]:
+        plan_id = str(arguments.get("plan_id", "")).strip()
+        if not plan_id:
+            return _error_response(req_id, "Missing required 'plan_id' argument.")
+        task_id = str(arguments.get("task_id", "")).strip()
+        body: dict[str, Any] = {"plan_id": plan_id}
+        if name == "plan_task_start":
+            if task_id:
+                body["task_id"] = task_id
+        else:
+            if not task_id:
+                return _error_response(req_id, "Missing required 'task_id' argument.")
+            body["task_id"] = task_id
+            if name == "plan_task_done":
+                body["result"] = str(arguments.get("result", ""))
+            body["log"] = str(arguments.get("log", ""))
+        result = self._request("POST", self._PLAN_TRANSITION_PATHS[name], body)
+        if isinstance(result, dict) and result.get("error"):
+            return _error_response(req_id, result["error"])
+        return _tool_result(req_id, json.dumps(result, ensure_ascii=False, default=str))
 
     def _restart(self, arguments: dict[str, Any], req_id: Any) -> dict[str, Any]:
         reason = str(arguments.get("reason", "")).strip()
@@ -412,6 +589,15 @@ class HarnessMcpServer(StdioMcpServer):
 
         if name == "harness_restart":
             return self._restart(arguments, req_id)
+
+        if name == "plan_create":
+            return self._plan_create(arguments, req_id)
+
+        if name == "plan_list":
+            return self._plan_list(req_id)
+
+        if name in self._PLAN_TRANSITION_PATHS:
+            return self._plan_task_transition(name, arguments, req_id)
 
         if name == "harness_self_wake_cancel":
             event_id = str(arguments.get("event_id", "")).strip()
