@@ -20,7 +20,10 @@ class SelfStatePlugin(StatePlugin):
 
     The plugin loads the saved note for the agent and reminds it to keep the note
     up to date, but it never writes the note itself. Only content the agent places
-    inside a ``<self_state>`` block is persisted.
+    inside a ``<self_state>`` block is persisted — plus a bounded ``## mid-turn``
+    section the agent may edit directly between block saves, which the plugin
+    carries forward (capped at ``mid_turn_max_chars``, default 1024) so a block
+    save cannot wipe in-flight scratch notes.
     """
 
     _SELF_STATE_TAG_RE = re.compile(r"</?self_state>", re.IGNORECASE)
@@ -37,6 +40,11 @@ class SelfStatePlugin(StatePlugin):
         r"^##\s*next-self\b[^\n]*\n?(.*?)(?=^##\s|\Z)",
         re.IGNORECASE | re.DOTALL | re.MULTILINE,
     )
+    _MID_TURN_RE = re.compile(
+        r"^##\s*mid-turn\b[^\n]*\n?(.*?)(?=^##\s|\Z)",
+        re.IGNORECASE | re.DOTALL | re.MULTILINE,
+    )
+    _MID_TURN_DEFAULT_MAX_CHARS = 1024
     _STALE_NEXT_SELF_HEADER = "## next-self (stale — carried from previous note)"
     _HEADER = "## State I am resuming from"
     _REMINDER = (
@@ -131,9 +139,67 @@ class SelfStatePlugin(StatePlugin):
         body = match.group(1).strip()
         return body or None
 
+    def _mid_turn_section(self, note: str) -> str | None:
+        """Return the whole `## mid-turn` section (header + body), or None."""
+        match = self._MID_TURN_RE.search(note)
+        if match is None:
+            return None
+        return match.group(0).rstrip()
+
+    def _mid_turn_budget(self) -> int:
+        try:
+            return int(
+                self.config.config.get(
+                    "mid_turn_max_chars", self._MID_TURN_DEFAULT_MAX_CHARS
+                )
+            )
+        except (TypeError, ValueError):
+            return self._MID_TURN_DEFAULT_MAX_CHARS
+
+    def _cap_mid_turn(self, section: str) -> str:
+        """Trim a `## mid-turn` section to its budget, keeping the newest lines."""
+        budget = self._mid_turn_budget()
+        if len(section) <= budget:
+            return section
+        lines = section.split("\n")
+        header, kept = lines[0], []
+        size = len(header)
+        for line in reversed(lines[1:]):
+            remaining = budget - size
+            if remaining <= 1:
+                break
+            if len(line) + 1 <= remaining:
+                kept.append(line)
+                size += len(line) + 1
+            else:
+                # Newest line overflows the bound: keep its tail, not nothing.
+                kept.append(line[-(remaining - 1) :])
+                break
+        kept.reverse()
+        return "\n".join([header, *kept])
+
+    def _bounded_note(self, note: str) -> str:
+        """Apply the mid-turn cap to the note's `## mid-turn` section, if any."""
+        match = self._MID_TURN_RE.search(note)
+        if match is None:
+            return note
+        capped = self._cap_mid_turn(match.group(0).rstrip())
+        if capped == match.group(0):
+            return note
+        suffix = note[match.end() :]
+        return note[: match.start()] + capped + ("\n\n" + suffix if suffix else "")
+
     def _maybe_save_state(self, note: str) -> None:
         """Save the note if it is first-person; otherwise flag a rejected reminder."""
         if self._is_first_person(note):
+            note = self._bounded_note(note)
+            if self._mid_turn_section(note) is None:
+                # Bounded direct writes (`## mid-turn` scratch the agent edits
+                # between `<self_state>` updates) must survive a block save —
+                # the block replaces the whole file, so carry the section.
+                old_section = self._mid_turn_section(self._load_state())
+                if old_section is not None:
+                    note = note.rstrip() + "\n\n" + self._cap_mid_turn(old_section)
             if self._next_self_body(note) is None:
                 # A mid-turn state update that forgets `## next-self` must not
                 # silently drop the last handoff — carry it forward marked stale.
@@ -177,7 +243,7 @@ class SelfStatePlugin(StatePlugin):
         return context
 
     def prompt_block(self, max_chars: int | None = None, compact: bool = False) -> str | None:
-        note = self._load_state().strip()
+        note = self._bounded_note(self._load_state().strip())
         remind = self._remind
         rejected = self._rejected
         self._remind = False

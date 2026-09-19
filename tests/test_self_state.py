@@ -490,3 +490,121 @@ def test_carry_forward_excludes_sections_after_next_self(tmp_path: Path) -> None
     text = p._load_state()
     assert "The handoff." in text
     assert "Unrelated list." not in text
+
+
+def _make_bounded_config() -> PluginConfig:
+    cfg = _make_config()
+    cfg.config["mid_turn_max_chars"] = 60
+    return cfg
+
+
+def test_mid_turn_carried_when_new_note_lacks_it(tmp_path: Path) -> None:
+    """A block save replaces the whole file, so `## mid-turn` is carried."""
+    p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
+    p._save_state("I am warm.\n\n## mid-turn\n- probing ctl socket\n- tests green")
+    p._maybe_save_state("I am still warm.")
+    text = p._load_state()
+    assert "I am still warm." in text
+    assert "## mid-turn" in text
+    assert "- probing ctl socket" in text
+    assert "- tests green" in text
+
+
+def test_mid_turn_fresh_section_replaces_old(tmp_path: Path) -> None:
+    p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
+    p._save_state("I am warm.\n\n## mid-turn\n- old crumb")
+    p._maybe_save_state("I am new.\n\n## mid-turn\n- fresh crumb")
+    text = p._load_state()
+    assert "- fresh crumb" in text
+    assert "- old crumb" not in text
+
+
+def test_mid_turn_no_carry_when_no_prior_section(tmp_path: Path) -> None:
+    p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
+    p._save_state("I am warm.")
+    p._maybe_save_state("I am new.")
+    assert "## mid-turn" not in p._load_state()
+
+
+def test_mid_turn_carry_does_not_stack(tmp_path: Path) -> None:
+    p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
+    p._save_state("I am warm.\n\n## mid-turn\n- one crumb")
+    p._maybe_save_state("I am busy.")
+    p._maybe_save_state("I am busier.")
+    text = p._load_state()
+    assert text.count("## mid-turn") == 1
+    assert text.count("- one crumb") == 1
+
+
+def test_mid_turn_carried_before_stale_next_self(tmp_path: Path) -> None:
+    p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
+    p._save_state("I am warm.\n\n## mid-turn\n- crumb\n\n## next-self\nThe handoff.")
+    p._maybe_save_state("I am busy.")
+    text = p._load_state()
+    assert "- crumb" in text
+    assert "The handoff." in text
+    assert text.index("## mid-turn") < text.index("## next-self")
+
+
+def test_mid_turn_section_stops_at_next_heading(tmp_path: Path) -> None:
+    p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
+    note = "I am here.\n\n## mid-turn\n- crumb\n\n## next-self\nThe handoff."
+    assert p._mid_turn_section(note) == "## mid-turn\n- crumb"
+
+
+def test_mid_turn_direct_edit_survives_block_save(tmp_path: Path) -> None:
+    """The blessed flow: scratch written to the file mid-turn is kept."""
+    p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
+    p._save_state("I am starting the batch.")
+    state_path = tmp_path / "chat-1" / "chat_self_state.md"
+    state_path.write_text(
+        state_path.read_text(encoding="utf-8")
+        + "\n\n## mid-turn\n- conftest scoped\n- ruff clean",
+        encoding="utf-8",
+    )
+    p.on_partial(_partial("Update.\n<self_state>I am mid-batch.</self_state>"))
+    text = p._load_state()
+    assert "I am mid-batch." in text
+    assert "- conftest scoped" in text
+    assert "- ruff clean" in text
+
+
+def test_mid_turn_capped_to_budget_on_save(tmp_path: Path) -> None:
+    """An over-budget section keeps the newest lines within the bound."""
+    p = SelfStatePlugin(_make_bounded_config(), "chat-1", tmp_path)
+    p._save_state(
+        "I am warm.\n\n## mid-turn\n- oldest crumb line\n- middle crumb line\n- newest crumb line"
+    )
+    p._maybe_save_state("I am new.")
+    text = p._load_state()
+    section = p._mid_turn_section(text)
+    assert section is not None
+    assert len(section) <= 60
+    assert "- newest crumb line" in section
+    assert "- oldest crumb line" not in section
+
+
+def test_mid_turn_oversized_newest_line_keeps_tail(tmp_path: Path) -> None:
+    """A single crumb longer than the budget keeps its tail, not nothing."""
+    p = SelfStatePlugin(_make_bounded_config(), "chat-1", tmp_path)
+    long_crumb = "- " + "x" * 120
+    p._save_state(f"I am warm.\n\n## mid-turn\n- old\n{long_crumb}")
+    p._maybe_save_state("I am new.")
+    section = p._mid_turn_section(p._load_state())
+    assert section is not None
+    assert len(section) <= 60
+    assert "x" in section
+
+
+def test_prompt_block_bounds_mid_turn_section(tmp_path: Path) -> None:
+    """A direct over-budget write renders bounded before the next save."""
+    p = SelfStatePlugin(_make_bounded_config(), "chat-1", tmp_path)
+    p._save_state(
+        "I am warm.\n\n## mid-turn\n- oldest crumb line\n- middle crumb line\n- newest crumb line"
+    )
+    block = p.prompt_block()
+    assert block is not None
+    assert "- newest crumb line" in block
+    assert "- oldest crumb line" not in block
+    # The file itself is untouched — the bound is render-time.
+    assert "- oldest crumb line" in p._load_state()
