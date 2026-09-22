@@ -22,7 +22,7 @@ class SelfStatePlugin(StatePlugin):
     up to date, but it never writes the note itself. Only content the agent places
     inside a ``<self_state>`` block is persisted — plus a bounded ``## mid-turn``
     section the agent may edit directly between block saves, which the plugin
-    carries forward (capped at ``mid_turn_max_chars``, default 1024) so a block
+    carries forward (capped at ``mid_turn_max_chars``, default 4096) so a block
     save cannot wipe in-flight scratch notes.
     """
 
@@ -44,7 +44,7 @@ class SelfStatePlugin(StatePlugin):
         r"^##\s*mid-turn\b[^\n]*\n?(.*?)(?=^##\s|\Z)",
         re.IGNORECASE | re.DOTALL | re.MULTILINE,
     )
-    _MID_TURN_DEFAULT_MAX_CHARS = 1024
+    _MID_TURN_DEFAULT_MAX_CHARS = 4096
     _STALE_NEXT_SELF_HEADER = "## next-self (stale — carried from previous note)"
     _HEADER = "## State I am resuming from"
     _REMINDER = (
@@ -157,25 +157,34 @@ class SelfStatePlugin(StatePlugin):
             return self._MID_TURN_DEFAULT_MAX_CHARS
 
     def _cap_mid_turn(self, section: str) -> str:
-        """Trim a `## mid-turn` section to its budget, keeping the newest lines."""
+        """Trim a `## mid-turn` section to its budget, keeping the newest lines.
+
+        Lines are dropped whole — a tail-cut crumb reads as file corruption,
+        not trimming. When anything is dropped a marker line records the count
+        so the trim is visible rather than silent.
+        """
         budget = self._mid_turn_budget()
         if len(section) <= budget:
             return section
-        lines = section.split("\n")
-        header, kept = lines[0], []
+        header, *rest = section.split("\n")
+        kept: list[str] = []
         size = len(header)
-        for line in reversed(lines[1:]):
-            remaining = budget - size
-            if remaining <= 1:
-                break
-            if len(line) + 1 <= remaining:
+        for line in reversed(rest):
+            if len(line) + 1 <= budget - size:
                 kept.append(line)
                 size += len(line) + 1
-            else:
-                # Newest line overflows the bound: keep its tail, not nothing.
-                kept.append(line[-(remaining - 1) :])
-                break
         kept.reverse()
+        dropped = len(rest) - len(kept)
+        if dropped:
+            def _marker(n: int) -> str:
+                return f"- …({n} earlier line{'s' if n > 1 else ''} trimmed)"
+
+            marker = _marker(dropped)
+            while kept and len("\n".join([header, marker, *kept])) > budget:
+                kept.pop(0)
+                dropped += 1
+                marker = _marker(dropped)
+            kept.insert(0, marker)
         return "\n".join([header, *kept])
 
     def _bounded_note(self, note: str) -> str:

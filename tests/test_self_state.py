@@ -584,8 +584,9 @@ def test_mid_turn_capped_to_budget_on_save(tmp_path: Path) -> None:
     assert "- oldest crumb line" not in section
 
 
-def test_mid_turn_oversized_newest_line_keeps_tail(tmp_path: Path) -> None:
-    """A single crumb longer than the budget keeps its tail, not nothing."""
+def test_mid_turn_oversized_line_dropped_whole_with_marker(tmp_path: Path) -> None:
+    """A crumb longer than the budget is dropped whole — a tail fragment
+    reads as corruption — and a marker line records the trim."""
     p = SelfStatePlugin(_make_bounded_config(), "chat-1", tmp_path)
     long_crumb = "- " + "x" * 120
     p._save_state(f"I am warm.\n\n## mid-turn\n- old\n{long_crumb}")
@@ -593,7 +594,24 @@ def test_mid_turn_oversized_newest_line_keeps_tail(tmp_path: Path) -> None:
     section = p._mid_turn_section(p._load_state())
     assert section is not None
     assert len(section) <= 60
-    assert "x" in section
+    assert "x" not in section  # no tail fragment survives
+    assert "trimmed" in section
+    assert "- old" in section
+
+
+def test_mid_turn_marker_counts_evicted_lines(tmp_path: Path) -> None:
+    """The marker's count includes lines evicted to make room for it."""
+    p = SelfStatePlugin(_make_bounded_config(), "chat-1", tmp_path)
+    p._save_state(
+        "I am warm.\n\n## mid-turn\n- oldest crumb line\n- middle crumb line\n- newest crumb line"
+    )
+    p._maybe_save_state("I am new.")
+    section = p._mid_turn_section(p._load_state())
+    assert section is not None
+    assert len(section) <= 60
+    assert "- newest crumb line" in section
+    assert "- oldest crumb line" not in section
+    assert "(2 earlier lines trimmed)" in section
 
 
 def test_prompt_block_bounds_mid_turn_section(tmp_path: Path) -> None:
