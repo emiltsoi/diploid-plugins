@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 from pathlib import Path
 
 import pytest
@@ -295,9 +297,7 @@ def test_on_partial_saves_latest_block_when_state_changes(tmp_path: Path) -> Non
     p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
     p.on_partial(_partial("<self_state>I am first.</self_state>"))
     p.on_partial(
-        _partial(
-            "<self_state>I am first.</self_state> then <self_state>I am second.</self_state>"
-        )
+        _partial("<self_state>I am first.</self_state> then <self_state>I am second.</self_state>")
     )
     assert p._load_state() == "I am second."
 
@@ -412,9 +412,7 @@ def test_prompt_block_shows_rejected_reminder_under_max_chars(tmp_path: Path) ->
 def test_next_self_carried_forward_when_new_note_lacks_it(tmp_path: Path) -> None:
     """A mid-turn update that forgets `## next-self` must not drop the handoff."""
     p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
-    p._save_state(
-        "I am warm.\n\n## next-self\nI go down building the felt layer; continue it."
-    )
+    p._save_state("I am warm.\n\n## next-self\nI go down building the felt layer; continue it.")
     p._maybe_save_state("I am still warm, now also curious.")
     text = p._load_state()
     assert "I am still warm, now also curious." in text
@@ -483,9 +481,7 @@ def test_next_self_body_stops_at_next_heading(tmp_path: Path) -> None:
 
 def test_carry_forward_excludes_sections_after_next_self(tmp_path: Path) -> None:
     p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
-    p._save_state(
-        "I am warm.\n\n## next-self\nThe handoff.\n\n## todo\nUnrelated list."
-    )
+    p._save_state("I am warm.\n\n## next-self\nThe handoff.\n\n## todo\nUnrelated list.")
     p._maybe_save_state("I am busy.")
     text = p._load_state()
     assert "The handoff." in text
@@ -558,8 +554,7 @@ def test_mid_turn_direct_edit_survives_block_save(tmp_path: Path) -> None:
     p._save_state("I am starting the batch.")
     state_path = tmp_path / "chat-1" / "chat_self_state.md"
     state_path.write_text(
-        state_path.read_text(encoding="utf-8")
-        + "\n\n## mid-turn\n- conftest scoped\n- ruff clean",
+        state_path.read_text(encoding="utf-8") + "\n\n## mid-turn\n- conftest scoped\n- ruff clean",
         encoding="utf-8",
     )
     p.on_partial(_partial("Update.\n<self_state>I am mid-batch.</self_state>"))
@@ -626,3 +621,152 @@ def test_prompt_block_bounds_mid_turn_section(tmp_path: Path) -> None:
     assert "- oldest crumb line" not in block
     # The file itself is untouched — the bound is render-time.
     assert "- oldest crumb line" in p._load_state()
+
+
+def _read_ledger(chat_dir: Path) -> list[dict]:
+    path = chat_dir / "chat_open_items.jsonl"
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+def test_open_items_section_projects_to_ledger(tmp_path: Path) -> None:
+    """`## open-items` bullets land in chat_open_items.jsonl with the schema row."""
+    p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
+    p._maybe_save_state(
+        "I am mid-arc.\n\n## open-items\n"
+        "- land the producer · id: oi-producer · kind: work · checked_by: pytest roundtrip\n"
+        "- verify hindsight tags_match live · kind: retro-delta · evidence: retro#1\n\n"
+        "## next-self\nKeep going."
+    )
+    rows = _read_ledger(tmp_path / "chat-1")
+    assert rows[0] == {"_schema": "open_items/v1"}
+    first, second = rows[1], rows[2]
+    assert first["id"] == "oi-producer"
+    assert first["claim"] == "land the producer"
+    assert first["status"] == "open"
+    assert first["kind"] == "work"
+    assert first["checked_by"] == "pytest roundtrip"
+    assert second["kind"] == "retro-delta"
+    assert second["evidence"] == "retro#1"
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", first["since"])
+
+
+def test_open_items_bullet_without_fields_gets_derived_id(tmp_path: Path) -> None:
+    """A bare `- claim` bullet still rows, with a deterministic derived id."""
+    p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
+    note = "I am mid-arc.\n\n## open-items\n- carry the torch"
+    p._maybe_save_state(note)
+    p._maybe_save_state(note)  # save twice: id must be stable
+    rows = _read_ledger(tmp_path / "chat-1")
+    assert len(rows) == 2  # schema + one item
+    item = rows[1]
+    assert item["claim"] == "carry the torch"
+    assert item["id"].startswith("oi-")
+    assert item["status"] == "open"
+
+
+def test_open_items_since_survives_and_status_edits_apply(tmp_path: Path) -> None:
+    """`since` is preserved by id across rewrites; status edits land."""
+    p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
+    p._maybe_save_state(
+        "I am mid-arc.\n\n## open-items\n- land the producer · id: oi-producer · since: 2026-10-17"
+    )
+    first_since = _read_ledger(tmp_path / "chat-1")[1]["since"]
+    p._maybe_save_state(
+        "I am still mid-arc.\n\n## open-items\n- land the producer · id: oi-producer · status: done"
+    )
+    rows = _read_ledger(tmp_path / "chat-1")
+    assert rows[1]["since"] == first_since
+    assert rows[1]["status"] == "done"
+
+
+def test_open_items_since_preserved_when_field_dropped(tmp_path: Path) -> None:
+    """Dropping an explicit `since:` on the next save keeps the prior value."""
+    p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
+    p._maybe_save_state(
+        "I am mid-arc.\n\n## open-items\n- land the producer · id: oi-producer · since: 2026-10-10"
+    )
+    p._maybe_save_state(
+        "I am still mid-arc.\n\n## open-items\n- land the producer · id: oi-producer"
+    )
+    assert _read_ledger(tmp_path / "chat-1")[1]["since"] == "2026-10-10"
+
+
+def test_open_items_absent_section_carries_ledger(tmp_path: Path) -> None:
+    """A save without `## open-items` leaves the file alone and carries the
+    section forward stale in the note — forgetfulness never discharges."""
+    p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
+    p._maybe_save_state("I am mid-arc.\n\n## open-items\n- land the producer · id: oi-producer")
+    before = (tmp_path / "chat-1" / "chat_open_items.jsonl").read_text()
+    p._maybe_save_state("I am still warm.")
+    assert (tmp_path / "chat-1" / "chat_open_items.jsonl").read_text() == before
+    note = p._load_state()
+    assert "## open-items (stale — carried from previous note)" in note
+    assert "- land the producer · id: oi-producer" in note
+
+
+def test_open_items_carried_section_reprojects(tmp_path: Path) -> None:
+    """The stale-carried section still matches the heading, so a later save
+    re-projects it — the ledger can't drift from the note."""
+    p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
+    p._maybe_save_state("I am mid-arc.\n\n## open-items\n- land the producer · id: oi-producer")
+    p._maybe_save_state("I am still warm.")
+    p._maybe_save_state("I am warmer still.")
+    rows = _read_ledger(tmp_path / "chat-1")
+    assert rows[1]["id"] == "oi-producer"
+
+
+def test_open_items_empty_section_clears_ledger(tmp_path: Path) -> None:
+    """An explicitly empty `## open-items` heading clears to the schema row —
+    authoring the heading is a deliberate discharge."""
+    p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
+    p._maybe_save_state("I am mid-arc.\n\n## open-items\n- land the producer · id: oi-producer")
+    p._maybe_save_state("I am clear.\n\n## open-items\n\n## next-self\nLedger empty.")
+    rows = _read_ledger(tmp_path / "chat-1")
+    assert rows == [{"_schema": "open_items/v1"}]
+
+
+def test_open_items_malformed_lines_skipped(tmp_path: Path) -> None:
+    """Non-bullet lines and empty bullets don't row; good lines still emit."""
+    p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
+    p._maybe_save_state(
+        "I am mid-arc.\n\n## open-items\n"
+        "not a bullet\n-\n- real claim · status: open\n"
+        "plain prose line"
+    )
+    rows = _read_ledger(tmp_path / "chat-1")
+    assert len(rows) == 2
+    assert rows[1]["claim"] == "real claim"
+
+
+def test_open_items_claim_keeps_stray_separators(tmp_path: Path) -> None:
+    """A `·` segment that isn't `key: value` folds back into the claim."""
+    p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
+    p._maybe_save_state("I am mid-arc.\n\n## open-items\n- fix lint · then ship · id: oi-lint")
+    item = _read_ledger(tmp_path / "chat-1")[1]
+    assert item["claim"] == "fix lint · then ship"
+    assert item["id"] == "oi-lint"
+
+
+def test_open_items_emit_never_breaks_save(tmp_path: Path) -> None:
+    """An unwritable ledger path still leaves the note saved."""
+    p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
+    blocker = tmp_path / "chat-1" / "chat_open_items.jsonl"
+    blocker.parent.mkdir(parents=True, exist_ok=True)
+    blocker.mkdir()  # os.replace onto a directory raises OSError
+    p._maybe_save_state("I am mid-arc.\n\n## open-items\n- land the producer · id: oi-producer")
+    assert "I am mid-arc." in p._load_state()
+
+
+def test_open_items_emit_via_record_turn_path(tmp_path: Path) -> None:
+    """The public path — a `<self_state>` block in the reply — projects too."""
+    p = SelfStatePlugin(_make_config(), "chat-1", tmp_path)
+    context = RecordTurnContext(
+        chat_id="chat-1",
+        record=_record(),
+        turn_number=1,
+        reply="Done.\n\n<self_state>I am mid-arc.\n\n## open-items\n- carry on · id: oi-carry</self_state>",
+    )
+    p.before_record_turn(context)
+    rows = _read_ledger(tmp_path / "chat-1")
+    assert rows[1]["id"] == "oi-carry"
+    assert "<self_state>" not in context.reply

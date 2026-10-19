@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
+import os
 import re
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +17,8 @@ from diploid_agent.models import PartialTurn
 from diploid_agent.plugins.base import StatePlugin, WakeContext
 from diploid_agent.plugins.contexts import RecordTurnContext
 from diploid_agent.runtime.plugin_runtime import PluginRuntime
+
+logger = logging.getLogger(__name__)
 
 
 class SelfStatePlugin(StatePlugin):
@@ -44,16 +50,25 @@ class SelfStatePlugin(StatePlugin):
         r"^##\s*mid-turn\b[^\n]*\n?(.*?)(?=^##\s|\Z)",
         re.IGNORECASE | re.DOTALL | re.MULTILINE,
     )
+    _OPEN_ITEMS_RE = re.compile(
+        r"^##\s*open-items\b[^\n]*\n?(.*?)(?=^##\s|\Z)",
+        re.IGNORECASE | re.DOTALL | re.MULTILINE,
+    )
+    _OPEN_ITEMS_BULLET_RE = re.compile(r"^\s*[-*]\s+(.*)$")
+    _ITEM_FIELD_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)$")
     _MID_TURN_DEFAULT_MAX_CHARS = 4096
     _STALE_NEXT_SELF_HEADER = "## next-self (stale — carried from previous note)"
+    _STALE_OPEN_ITEMS_HEADER = "## open-items (stale — carried from previous note)"
+    _OPEN_ITEMS_DEFAULT_FILE = "chat_open_items.jsonl"
+    _OPEN_ITEMS_SCHEMA = "open_items/v1"
     _HEADER = "## State I am resuming from"
     _REMINDER = (
         "Update this with a `<self_state>` block in first person, present tense; "
-        "end it with `## next-self` for whoever wakes next."
+        "end it with `## next-self` for whoever wakes next. Keep `## open-items` "
+        "for durable debts — `- <claim> · id: … · status: open · kind: … "
+        "· checked_by: …`."
     )
-    _NO_HANDOFF_NUDGE = (
-        "No `## next-self` handoff found — reconstruct one from the wake state."
-    )
+    _NO_HANDOFF_NUDGE = "No `## next-self` handoff found — reconstruct one from the wake state."
     _REJECTED_REMINDER = (
         "Your last `<self_state>` block was not in first person and was not saved. "
         "Write it as your own direct statement of being: 'I am...' or 'We are...'."
@@ -149,9 +164,7 @@ class SelfStatePlugin(StatePlugin):
     def _mid_turn_budget(self) -> int:
         try:
             return int(
-                self.config.config.get(
-                    "mid_turn_max_chars", self._MID_TURN_DEFAULT_MAX_CHARS
-                )
+                self.config.config.get("mid_turn_max_chars", self._MID_TURN_DEFAULT_MAX_CHARS)
             )
         except (TypeError, ValueError):
             return self._MID_TURN_DEFAULT_MAX_CHARS
@@ -176,6 +189,7 @@ class SelfStatePlugin(StatePlugin):
         kept.reverse()
         dropped = len(rest) - len(kept)
         if dropped:
+
             def _marker(n: int) -> str:
                 return f"- …({n} earlier line{'s' if n > 1 else ''} trimmed)"
 
@@ -198,6 +212,113 @@ class SelfStatePlugin(StatePlugin):
         suffix = note[match.end() :]
         return note[: match.start()] + capped + ("\n\n" + suffix if suffix else "")
 
+    def _open_items_section(self, note: str) -> str | None:
+        """Return the `## open-items` section body, or None when absent.
+
+        An explicitly empty section returns ``""`` — the author wrote the
+        heading, so the ledger clears rather than carrying stale rows.
+        """
+        match = self._OPEN_ITEMS_RE.search(note)
+        if match is None:
+            return None
+        return match.group(1).strip()
+
+    def _open_items_path(self) -> Path:
+        name = self.config.config.get("open_items_file", self._OPEN_ITEMS_DEFAULT_FILE)
+        return self._chat_dir() / str(name)
+
+    def _parse_open_item_line(self, line: str) -> dict[str, str] | None:
+        """One `## open-items` bullet into a claims row.
+
+        Format: ``- <claim> · key: value · key: value``. The first `·`-segment
+        is the claim; later ``key: value`` segments set fields; a `·` segment
+        that does not parse folds back into the claim so stray text is never
+        silently dropped.
+        """
+        match = self._OPEN_ITEMS_BULLET_RE.match(line)
+        if match is None:
+            return None
+        segments = match.group(1).split("·")
+        claim_parts = [segments[0].strip()]
+        fields: dict[str, str] = {}
+        for segment in segments[1:]:
+            field = self._ITEM_FIELD_RE.match(segment.strip())
+            if field:
+                fields[field.group(1)] = field.group(2).strip()
+            else:
+                claim_parts.append(segment.strip())
+        claim = " · ".join(part for part in claim_parts if part)
+        if not claim:
+            return None
+        fields["claim"] = claim
+        return fields
+
+    def _load_open_items(self) -> dict[str, dict[str, Any]]:
+        """Existing ledger rows keyed by id — read for `since` preservation."""
+        try:
+            lines = self._open_items_path().read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return {}
+        rows: dict[str, dict[str, Any]] = {}
+        for line in lines:
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(row, dict) and isinstance(row.get("id"), str):
+                rows[row["id"]] = row
+        return rows
+
+    def _emit_open_items(self, note: str) -> None:
+        """Project the note's `## open-items` section into the claims ledger.
+
+        The section is the author's edit surface; ``chat_open_items.jsonl`` is
+        the machine-readable surface the reconciliation detector diffs against
+        the world (open-items plan, phase 2). Row shape::
+
+            {"id": ..., "claim": ..., "since": "YYYY-MM-DD", "status": "open",
+             "kind"?, "checked_by"?, "evidence"?, ...extra fields passthrough}
+
+        `since` survives rewrites by id; an absent section carries the file —
+        a mid-turn update that forgets the heading never discharges the
+        ledger. Never raises into the save path: a ledger write must not
+        break the note.
+        """
+        section = self._open_items_section(note)
+        if section is None:
+            return
+        try:
+            prior = self._load_open_items()
+            today = datetime.now(UTC).strftime("%Y-%m-%d")
+            rows: list[dict[str, Any]] = [{"_schema": self._OPEN_ITEMS_SCHEMA}]
+            for line in section.splitlines():
+                fields = self._parse_open_item_line(line)
+                if fields is None:
+                    continue
+                claim = fields.pop("claim")
+                row_id = (
+                    fields.pop("id", None)
+                    or "oi-" + hashlib.sha1(claim.encode("utf-8")).hexdigest()[:8]
+                )
+                item: dict[str, Any] = {
+                    "id": row_id,
+                    "claim": claim,
+                    "since": fields.pop("since", "") or prior.get(row_id, {}).get("since") or today,
+                    "status": fields.pop("status", "") or "open",
+                }
+                item.update(fields)
+                rows.append(item)
+            path = self._open_items_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text(
+                "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+            os.replace(tmp, path)
+        except OSError:
+            logger.warning("Could not write open-items ledger in %s", self._chat_dir())
+
     def _maybe_save_state(self, note: str) -> None:
         """Save the note if it is first-person; otherwise flag a rejected reminder."""
         if self._is_first_person(note):
@@ -214,11 +335,16 @@ class SelfStatePlugin(StatePlugin):
                 # silently drop the last handoff — carry it forward marked stale.
                 old_body = self._next_self_body(self._load_state())
                 if old_body:
-                    note = (
-                        note.rstrip()
-                        + f"\n\n{self._STALE_NEXT_SELF_HEADER}\n{old_body}"
-                    )
+                    note = note.rstrip() + f"\n\n{self._STALE_NEXT_SELF_HEADER}\n{old_body}"
+            if self._open_items_section(note) is None:
+                # Same courtesy as next-self: a forgotten `## open-items`
+                # section must not drop the ledger from the note — carry it
+                # forward marked stale, so note and ledger stay consistent.
+                old_items = self._open_items_section(self._load_state())
+                if old_items:
+                    note = note.rstrip() + f"\n\n{self._STALE_OPEN_ITEMS_HEADER}\n{old_items}"
             self._save_state(note)
+            self._emit_open_items(note)
             self._rejected = False
         else:
             self._rejected = True
@@ -307,7 +433,4 @@ class SelfStatePlugin(StatePlugin):
             return None
         budget = int(self.config.config.get("memory_append_budget", 10))
         over = " — over soft budget; compact before more" if max(persona, chat) > budget else ""
-        return (
-            f"Memory appends today: MEMORY.md {persona}/{budget}, "
-            f"chat {chat}/{budget}{over}."
-        )
+        return f"Memory appends today: MEMORY.md {persona}/{budget}, chat {chat}/{budget}{over}."
