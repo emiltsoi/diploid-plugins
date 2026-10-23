@@ -135,9 +135,16 @@ def _ctl_socket(tmp_path, monkeypatch, status: str = "scheduled"):
     """Bind a fake control socket; return the captured-request list."""
     import socket as _socket
     import threading
+    from pathlib import Path
 
     captured: list[dict[str, Any]] = []
-    path = tmp_path / "control.sock"
+    # Shallow /tmp base, not tmp_path: macOS TMPDIR sits under a deep
+    # /var/folders/... prefix that pushes the socket past AF_UNIX sun_path.
+    # tmp_path.name keeps per-test uniqueness without the depth.
+    sock_dir = Path("/tmp") / tmp_path.name
+    sock_dir.mkdir(exist_ok=True)
+    path = sock_dir / "control.sock"
+    path.unlink(missing_ok=True)  # stale socket from a prior run would block bind()
     srv = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
     srv.bind(str(path))
     srv.listen(1)
