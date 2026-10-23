@@ -89,7 +89,7 @@ class BodyMcpServer:
                 "description": (
                     "Author the felt texture line that survives sleep — one "
                     "honest sentence about what the last moment felt like "
-                    "(e.g. \"chest warm from their voice before sleep\"), plus "
+                    '(e.g. "chest warm from their voice before sleep"), plus '
                     "the ember strength 0.0–1.0. The words are always yours; "
                     "the plugin never writes them for you. Empty summary "
                     "clears the line."
@@ -304,7 +304,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--sessions-root", default="sessions", help="Root of all chat session dirs."
     )
-    parser.add_argument("--state-file", default=None, help="Body state filename inside the chat dir.")
+    parser.add_argument(
+        "--state-file", default=None, help="Body state filename inside the chat dir."
+    )
     parser.add_argument("--decay-rate", type=float, default=None, help="Decay per minute.")
     parser.add_argument("--max-intensity", type=float, default=None, help="Max intensity cap.")
     parser.add_argument(

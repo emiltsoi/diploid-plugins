@@ -146,7 +146,9 @@ class CheckpointPlugin(StatePlugin):
         if len(lines) <= self._config.max_breadcrumbs:
             return
         try:
-            path.write_text("\n".join(lines[-self._config.max_breadcrumbs :]) + "\n", encoding="utf-8")
+            path.write_text(
+                "\n".join(lines[-self._config.max_breadcrumbs :]) + "\n", encoding="utf-8"
+            )
         except OSError:
             logger.exception("Failed to trim breadcrumbs")
 
@@ -329,7 +331,9 @@ class CheckpointPlugin(StatePlugin):
             if recent:
                 lines.append(f"Recent steps ({side_effects_count} total):")
                 for eff in recent:
-                    lines.append(f"  - {eff.get('title') or 'tool'}: {eff.get('status') or 'running'}")
+                    lines.append(
+                        f"  - {eff.get('title') or 'tool'}: {eff.get('status') or 'running'}"
+                    )
             else:
                 lines.append(f"Side effects so far: {side_effects_count}")
 

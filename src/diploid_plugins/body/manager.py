@@ -95,9 +95,7 @@ class BodyManager:
             return PersonaBodyState()
         try:
             data = json.loads(self._persona_state_path.read_text())
-            known = {
-                k: v for k, v in data.items() if k in PersonaBodyState.__dataclass_fields__
-            }
+            known = {k: v for k, v in data.items() if k in PersonaBodyState.__dataclass_fields__}
             return PersonaBodyState(**known)
         except (json.JSONDecodeError, TypeError, ValueError):
             return PersonaBodyState()
@@ -238,7 +236,10 @@ class BodyManager:
             if not slot:
                 continue
             age = now - float(slot.get("set_at") or now)
-            if age >= self.config.attention_stale_seconds and slot.get("value") != ATTENTION_BASELINE:
+            if (
+                age >= self.config.attention_stale_seconds
+                and slot.get("value") != ATTENTION_BASELINE
+            ):
                 slot["value"] = ATTENTION_BASELINE
                 changed = True
         if changed:
@@ -575,9 +576,7 @@ class BodyManager:
             return str(slot["value"])
         return None
 
-    def _effective_attention(
-        self, persona: PersonaBodyState
-    ) -> tuple[dict[str, Any] | None, str]:
+    def _effective_attention(self, persona: PersonaBodyState) -> tuple[dict[str, Any] | None, str]:
         """Per-chat attention with the persona fallback, per the scope rule."""
         if self.state.attention and self.state.attention.get("value"):
             return self.state.attention, "this chat"
@@ -611,9 +610,7 @@ class BodyManager:
             else None
         )
         fresh = age_s is not None and age_s <= self.config.felt_expire_seconds
-        if self.state.felt_warmth <= self.config.felt_surface_threshold and not (
-            summary and fresh
-        ):
+        if self.state.felt_warmth <= self.config.felt_surface_threshold and not (summary and fresh):
             return None
         desc = self._describe(self.state.felt_warmth)
         if not summary:

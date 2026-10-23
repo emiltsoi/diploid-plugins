@@ -90,7 +90,7 @@ def test_prompt_block_returns_surface_and_rejects_stale(tmp_path: Path) -> None:
     (chat_dir / "chat_body_state.json").write_text('{"felt_warmth": 0.0}')
     (chat_dir / "chat_working_memory.json").write_text('{"intent": ""}')
     (chat_dir / "chat_TASKS.md").write_text("")
-    (chat_dir / "chat_wake_state.json").write_text('{}')
+    (chat_dir / "chat_wake_state.json").write_text("{}")
 
     mgr.write_handoff(None)
     block = mgr.prompt_block()
@@ -117,7 +117,7 @@ def test_plugin_before_session_archive_writes_surface(tmp_path: Path) -> None:
     (chat_dir / "chat_body_state.json").write_text('{"felt_warmth": 0.5}')
     (chat_dir / "chat_working_memory.json").write_text('{"intent": ""}')
     (chat_dir / "chat_TASKS.md").write_text("")
-    (chat_dir / "chat_wake_state.json").write_text('{}')
+    (chat_dir / "chat_wake_state.json").write_text("{}")
 
     record = SessionRecord(
         chat_id="chat-1",
@@ -144,7 +144,7 @@ def test_prompt_block_after_waking_uses_surface(tmp_path: Path) -> None:
     (chat_dir / "chat_body_state.json").write_text('{"felt_warmth": 0.6, "felt_summary": "mild"}')
     (chat_dir / "chat_working_memory.json").write_text('{"intent": "continue"}')
     (chat_dir / "chat_TASKS.md").write_text("")
-    (chat_dir / "chat_wake_state.json").write_text('{}')
+    (chat_dir / "chat_wake_state.json").write_text("{}")
 
     p.before_session_archive(
         SessionArchiveContext(

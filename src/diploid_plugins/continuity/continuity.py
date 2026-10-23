@@ -34,9 +34,7 @@ class ContinuityPlugin(StatePlugin):
         self._pending_partial: PartialTurn | None = None
         self._last_partial_write: float = 0.0
         self._throttle_seconds: float = 0.2
-        self._self_state_file: str = str(
-            config.config.get("self_state_file", "chat_self_state.md")
-        )
+        self._self_state_file: str = str(config.config.get("self_state_file", "chat_self_state.md"))
 
     def state_path(self) -> Path | None:
         if not self.config.state_file:
@@ -113,16 +111,11 @@ class ContinuityPlugin(StatePlugin):
             if ended_at:
                 self._state["last_process_ended_at"] = ended_at
                 self._state["last_process_ended_reason"] = "interrupted"
-                self._state["time_asleep_seconds"] = max(
-                    0.0, context.now - float(ended_at)
-                )
+                self._state["time_asleep_seconds"] = max(0.0, context.now - float(ended_at))
 
         # Closing momentum is due once after a resume/restart/fresh wake, and
         # not after an ordinary same-session follow-up.
-        if (
-            rehydration_reason in self._MOMENTUM_WAKE_REASONS
-            or self._state.get("instance_changed")
-        ):
+        if rehydration_reason in self._MOMENTUM_WAKE_REASONS or self._state.get("instance_changed"):
             self._state["last_turn_momentum_due"] = True
         else:
             self._state["last_turn_momentum_due"] = False
@@ -149,9 +142,7 @@ class ContinuityPlugin(StatePlugin):
             return
         try:
             interrupted_path = self._chat_dir() / "chat_interrupted_turn.json"
-            interrupted_path.write_text(
-                json.dumps(data, indent=2, default=str)
-            )
+            interrupted_path.write_text(json.dumps(data, indent=2, default=str))
             active_path.unlink()
         except OSError:
             return
@@ -204,9 +195,7 @@ class ContinuityPlugin(StatePlugin):
             text = path.read_text(encoding="utf-8")
         except OSError:
             text = ""
-        headings = re.findall(
-            r"^##\s*next-self\b[^\n]*", text, re.IGNORECASE | re.MULTILINE
-        )
+        headings = re.findall(r"^##\s*next-self\b[^\n]*", text, re.IGNORECASE | re.MULTILINE)
         if not headings:
             return (
                 "  No `## next-self` handoff survived the interruption — "
@@ -228,10 +217,7 @@ class ContinuityPlugin(StatePlugin):
         # A short grace absorbs the partial-write throttle window — a handoff
         # written in the same seconds as the kill must not read as stale.
         if interrupted_ts is not None and mtime < interrupted_ts - 2.0:
-            return (
-                "  Your `## next-self` handoff predates the interrupted turn "
-                "— it may be stale."
-            )
+            return "  Your `## next-self` handoff predates the interrupted turn — it may be stale."
         return None
 
     def _write_active_turn(self) -> None:
@@ -361,9 +347,7 @@ class ContinuityPlugin(StatePlugin):
                     "outside the transcript (see chat_interrupted_turn.json)."
                 )
             if last_session is not None and last_turn is not None:
-                parts.append(
-                    f"Last turn: session {last_session}, turn {last_turn}, {last_reason}."
-                )
+                parts.append(f"Last turn: session {last_session}, turn {last_turn}, {last_reason}.")
             if momentum:
                 parts.append(momentum)
             time_asleep = self._state.get("time_asleep_seconds")
@@ -400,9 +384,7 @@ class ContinuityPlugin(StatePlugin):
             count = interrupted.get("side_effects_count") or 0
             if count:
                 recent = interrupted.get("side_effects_recent") or []
-                recent_str = ", ".join(
-                    f"{e.get('title')} ({e.get('status')})" for e in recent
-                )
+                recent_str = ", ".join(f"{e.get('title')} ({e.get('status')})" for e in recent)
                 lines.append(
                     f"  Tool trace: {count} step(s) before interruption"
                     + (f" — {recent_str[:120]}" if recent_str else "")

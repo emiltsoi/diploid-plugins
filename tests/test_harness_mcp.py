@@ -276,7 +276,13 @@ def _server_with(result: Any) -> tuple[HarnessMcpServer, list[dict[str, Any]]]:
 def test_plan_tools_listed() -> None:
     server = HarnessMcpServer(chat_id="chat-1", harness_url="http://127.0.0.1:1")
     names = {t["name"] for t in server._tools()}
-    assert {"plan_create", "plan_list", "plan_task_start", "plan_task_done", "plan_task_fail"} <= names
+    assert {
+        "plan_create",
+        "plan_list",
+        "plan_task_start",
+        "plan_task_done",
+        "plan_task_fail",
+    } <= names
 
 
 def test_plan_create_posts_with_noop_default() -> None:

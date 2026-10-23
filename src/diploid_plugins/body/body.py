@@ -43,9 +43,7 @@ class BodyPlugin(StatePlugin):
             "felt_event_record_threshold",
             "felt_events_max_age_hours",
         )
-        self._felt_overrides = {
-            k: config.config[k] for k in felt_keys if k in config.config
-        }
+        self._felt_overrides = {k: config.config[k] for k in felt_keys if k in config.config}
         body_cfg = BodyConfig(
             state_file=config.state_file or "chat_body_state.json",
             max_prompt_chars=config.max_prompt_chars,

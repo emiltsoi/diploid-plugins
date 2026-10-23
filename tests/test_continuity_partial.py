@@ -442,9 +442,7 @@ def test_interrupted_turn_handoff_check_uses_config_filename(tmp_path: Path) -> 
     (chat_dir / "chat_active_turn.json").write_text(
         json.dumps({"turn_number": 5, "user_message": "hi", "updated_at": 9.0})
     )
-    (chat_dir / "custom_self.md").write_text(
-        "I am here.\n\n## next-self\nFresh handoff."
-    )
+    (chat_dir / "custom_self.md").write_text("I am here.\n\n## next-self\nFresh handoff.")
     p = ContinuityPlugin(
         PluginConfig(
             name="continuity",

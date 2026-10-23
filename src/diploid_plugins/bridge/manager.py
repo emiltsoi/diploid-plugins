@@ -203,9 +203,7 @@ class BridgeManager:
         """Write BRIDGE and SURFACE files at close."""
         state = self._collect_state(record)
         self._path(self.config.bridge_file).parent.mkdir(parents=True, exist_ok=True)
-        self._path(self.config.bridge_file).write_text(
-            self._render_bridge(state), encoding="utf-8"
-        )
+        self._path(self.config.bridge_file).write_text(self._render_bridge(state), encoding="utf-8")
         self._path(self.config.surface_file).write_text(
             self._render_surface(state), encoding="utf-8"
         )
