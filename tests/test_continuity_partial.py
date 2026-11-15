@@ -112,6 +112,7 @@ def _wake_context(
     now: float = 20.0,
     rehydration_reason: str | None = None,
     wake_reason: str | None = None,
+    mcp_servers: list[str] | None = None,
 ):
     from diploid_agent.models import SessionRecord, WakeEvent
     from diploid_agent.plugins.base import WakeContext
@@ -137,6 +138,7 @@ def _wake_context(
             created_at=0.0,
             updated_at=8.0,
             last_stop_reason="completed",
+            enabled_mcp_servers=mcp_servers,
         ),
         now=now,
         instance_id=instance_id,
@@ -731,3 +733,80 @@ def test_wake_preserves_side_effects_trace(tmp_path: Path) -> None:
     assert block is not None
     assert "Tool trace: 2 step(s) before interruption" in block
     assert "exec rmtree (running)" in block
+
+
+def test_prompt_block_lists_mcp_servers(tmp_path: Path) -> None:
+    """The wake block names the MCP set the session was established with."""
+    (tmp_path / "c1").mkdir()
+    p = _make_plugin(tmp_path)
+    p.on_waking(_wake_context(mcp_servers=["diploid-memory", "diploid-mesh"]))
+
+    block = p.prompt_block()
+    assert block is not None
+    assert "- MCP servers: diploid-memory, diploid-mesh" in block
+
+    compact = p.prompt_block(compact=True)
+    assert compact is not None
+    assert "MCP servers: diploid-memory, diploid-mesh." in compact
+
+
+def test_prompt_block_mcp_untracked_and_empty(tmp_path: Path) -> None:
+    """Untracked records and empty server sets are reported, not hidden."""
+    (tmp_path / "c1").mkdir()
+    p = _make_plugin(tmp_path)
+    p.on_waking(_wake_context())  # enabled_mcp_servers=None — legacy record
+    block = p.prompt_block()
+    assert block is not None
+    assert "- MCP servers: untracked" in block
+
+    p2 = _make_plugin(tmp_path / "empty")
+    p2.on_waking(_wake_context(mcp_servers=[]))
+    block2 = p2.prompt_block()
+    assert block2 is not None
+    assert "- MCP servers: none registered" in block2
+
+
+def test_prompt_block_flags_stub_only_fold(tmp_path: Path) -> None:
+    """A fold that left only the harness stub is named in the wake block."""
+    chat_dir = tmp_path / "c1"
+    chat_dir.mkdir()
+    (chat_dir / "chat_self_state.md").write_text(
+        "## next-self\n\n<!-- harness-handoff -->\nfloor\n<!-- /harness-handoff -->\n"
+    )
+    p = _make_plugin(tmp_path)
+    p.on_waking(_wake_context())
+
+    block = p.prompt_block()
+    assert block is not None
+    assert "- Last fold left only the harness stub" in block
+
+    compact = p.prompt_block(compact=True)
+    assert compact is not None
+    assert "Last fold left only the harness stub" in compact
+
+
+def test_prompt_block_no_fold_flag_when_pen_moved(tmp_path: Path) -> None:
+    """A model-authored ## next-self alongside the stub silences the flag."""
+    chat_dir = tmp_path / "c1"
+    chat_dir.mkdir()
+    (chat_dir / "chat_self_state.md").write_text(
+        "## next-self\n\n<!-- harness-handoff -->\nfloor\n<!-- /harness-handoff -->\n"
+        "\n## next-self — 2026-11-15\n\nI wrote this myself.\n"
+    )
+    p = _make_plugin(tmp_path)
+    p.on_waking(_wake_context())
+
+    block = p.prompt_block()
+    assert block is not None
+    assert "Last fold" not in block
+
+
+def test_prompt_block_no_fold_flag_without_self_state(tmp_path: Path) -> None:
+    """Missing self-state file means nothing to report."""
+    (tmp_path / "c1").mkdir()
+    p = _make_plugin(tmp_path)
+    p.on_waking(_wake_context())
+
+    block = p.prompt_block()
+    assert block is not None
+    assert "Last fold" not in block
