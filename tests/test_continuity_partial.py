@@ -810,3 +810,21 @@ def test_prompt_block_no_fold_flag_without_self_state(tmp_path: Path) -> None:
     block = p.prompt_block()
     assert block is not None
     assert "Last fold" not in block
+
+
+def test_fold_floor_degrades_without_handoff_module(tmp_path: Path, monkeypatch) -> None:
+    """Hot reload onto a harness without handoff_outcome degrades silently."""
+    import sys
+
+    chat_dir = tmp_path / "c1"
+    chat_dir.mkdir()
+    (chat_dir / "chat_self_state.md").write_text(
+        "## next-self\n\n<!-- harness-handoff -->\nfloor\n<!-- /harness-handoff -->\n"
+    )
+    p = _make_plugin(tmp_path)
+    p.on_waking(_wake_context())
+
+    monkeypatch.setitem(sys.modules, "diploid_agent.context.handoff", None)
+    block = p.prompt_block()
+    assert block is not None
+    assert "Last fold" not in block
