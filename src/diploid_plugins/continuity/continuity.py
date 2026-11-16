@@ -94,6 +94,10 @@ class ContinuityPlugin(StatePlugin):
             self._state["last_turn_number"] = context.record.turn_number
             self._state["last_stop_reason"] = context.record.last_stop_reason
             self._state["last_turn_at"] = context.record.updated_at
+            # The MCP set the session was established with — stamped at
+            # session create by the harness. A dead-tools wake is visible
+            # when this list names servers the tool surface doesn't have.
+            self._state["mcp_servers"] = context.record.enabled_mcp_servers
 
         pending = context.pending_dispatches or []
         self._state["pending_dispatches"] = pending
@@ -183,6 +187,43 @@ class ContinuityPlugin(StatePlugin):
 
     def _last_turn_path(self) -> Path:
         return self._chat_dir() / "chat_last_turn.json"
+
+    def _mcp_servers_line(self, compact: bool = False) -> str | None:
+        """Report the MCP set this session was established with."""
+        servers = self._state.get("mcp_servers")
+        if servers is None:
+            return "MCP servers: untracked." if compact else "- MCP servers: untracked"
+        if not servers:
+            return "MCP servers: none registered." if compact else "- MCP servers: none registered"
+        names = ", ".join(servers)
+        return f"MCP servers: {names}." if compact else f"- MCP servers: {names}"
+
+    def _fold_floor_line(self, compact: bool = False) -> str | None:
+        """Say when the last pressure fold left only the harness stub.
+
+        The stub is a floor, not a handoff — a wake that finds it alone
+        should know the outgoing self wrote nothing rather than assume a
+        real `## next-self` is on file. Detection lives in the harness
+        (``handoff_outcome``); lazy-imported so a hot reload onto an older
+        diploid-agent degrades silently instead of breaking the block.
+        """
+        path = self._chat_dir() / self._self_state_file
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            return None
+        try:
+            from diploid_agent.context.handoff import handoff_outcome
+        except ImportError:
+            return None
+        if handoff_outcome(text) != "stub_only":
+            return None
+        if compact:
+            return "Last fold left only the harness stub — no authored `## next-self`."
+        return (
+            "- Last fold left only the harness stub — the outgoing self "
+            "did not author `## next-self`."
+        )
 
     def _next_self_status(self, interrupted_at: Any) -> str | None:
         """Check whether a `## next-self` handoff survives the interruption.
@@ -356,6 +397,12 @@ class ContinuityPlugin(StatePlugin):
             pending = self._state.get("pending_dispatches") or []
             if pending:
                 parts.append(f"Pending work: {len(pending)} dispatch(es).")
+            servers_line = self._mcp_servers_line(compact=True)
+            if servers_line:
+                parts.append(servers_line)
+            fold_line = self._fold_floor_line(compact=True)
+            if fold_line:
+                parts.append(fold_line)
             block = " ".join(parts)
             if max_chars is not None and len(block) > max_chars:
                 block = block[:max_chars]
@@ -427,6 +474,13 @@ class ContinuityPlugin(StatePlugin):
                 lines.append(f"  - {d.get('id')}: {ctx[:60]}")
         else:
             lines.append("- Pending background work: none")
+
+        servers_line = self._mcp_servers_line()
+        if servers_line:
+            lines.append(servers_line)
+        fold_line = self._fold_floor_line()
+        if fold_line:
+            lines.append(fold_line)
 
         last_user = self._state.get("last_user_message", "")
         last_reply = self._state.get("last_assistant_reply", "")
